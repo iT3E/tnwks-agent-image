@@ -29,6 +29,9 @@ FAKE_SECRETS = {
     "LITELLM_API_KEY": "fake-model-key-2c8d04",
     "TELEGRAM_BOT_TOKEN": "fake-bot-token-9b51e6",
 }
+# A dummy gateway key in the env of the pod (the Claude CLI test only). The
+# mock names each key that it sees by a label, never by its value.
+POD_ENV_KEY = "dummy-pod-env-key-4e1b77"
 ARCHIVE_NAME = "openclaw-backup-test-archive.tar.gz"
 FILE_MARKER = "TNWKS-STATE-FILE-MARKER-5e0c72"
 
@@ -129,6 +132,7 @@ def mock_env():
         "MOCK_SECRET_VALUES": ",".join(FAKE_SECRETS.values()),
         "MOCK_ARCHIVE_NAME": ARCHIVE_NAME,
         "MOCK_FILE_MARKER": FILE_MARKER,
+        "MOCK_GATEWAY_KEYS": f"pod-env={POD_ENV_KEY},secret-env={FAKE_SECRETS['LITELLM_API_KEY']}",
     }
 
 
@@ -201,9 +205,10 @@ def mock_records(since=None):
     return records
 
 
-def agent_turn(session, message, timeout=900):
+def agent_turn(session, message, timeout=900, agent=None):
     """One turn of the agent in the test pod, through the CLI of the product."""
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    which = ["--agent", agent] if agent else []
     result = kx(
         "-n",
         AGENT_NS,
@@ -215,6 +220,7 @@ def agent_turn(session, message, timeout=900):
         "node",
         "/app/openclaw.mjs",
         "agent",
+        *which,
         "--session-id",
         session,
         "--message",

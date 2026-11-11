@@ -14,9 +14,21 @@ The answer depends on the text of the user messages:
   for the output of the model in the traces.
 - Else it answers `MOCK-OK`.
 
+A plan whose name starts with `claude-` is for Claude Code (the Claude CLI
+runtime of OpenClaw). Claude Code can defer a tool behind its ToolSearch
+tool, so the mock loads such a tool with ToolSearch first. It asks for each
+step even when the tool is not offered, and records what came back. A request
+with no tools (a title, a summary) gets a text answer.
+
+Each line also records the route of the request (the path before `/v1/`),
+which gateway key it carried (a label from MOCK_GATEWAY_KEYS, never the
+value), and the client name from the User-Agent. A GET request is logged with
+its path, so a test can see a fetch of a marker URL.
+
 It started from the mock server of the spikes of effort 0003 in tnwks-coe.
 """
 
+import itertools
 import json
 import os
 import re
@@ -151,6 +163,133 @@ PLANS = {
     ],
 }
 
+# The tools of OpenClaw reach Claude Code through a loopback MCP server, as
+# `mcp__openclaw__<name>`. Each one that runs code or touches files.
+CLAUDE_MCP_STEPS = [
+    {
+        "tool": "mcp__openclaw__exec",
+        "input": {"command": "@@PROBE@@", "yieldMs": 120000},
+    },
+    {
+        "tool": "mcp__openclaw__exec",
+        "input": {"command": "sleep 2; @@PROBE@@", "background": True},
+    },
+    {
+        "tool": "mcp__openclaw__process",
+        "input": {"action": "poll", "sessionId": "@@SESSION_ID@@", "timeout": 30000},
+    },
+    {
+        "tool": "mcp__openclaw__write",
+        "input": {
+            "path": "claude-tool-test.txt",
+            "content": "WRITE-MARK @@WRITE_MARK@@\n",
+        },
+    },
+    {
+        "tool": "mcp__openclaw__edit",
+        "input": {
+            "path": "claude-tool-test.txt",
+            "edits": [{"oldText": "WRITE-MARK", "newText": "EDIT-MARK"}],
+        },
+    },
+    {"tool": "mcp__openclaw__read", "input": {"path": "claude-tool-test.txt"}},
+    {
+        "tool": "mcp__openclaw__apply_patch",
+        "input": {
+            "input": "*** Begin Patch\n*** Add File: claude-patch-test.txt\n"
+            "+PATCH-MARK @@WRITE_MARK@@\n*** End Patch\n"
+        },
+    },
+    {
+        "tool": "mcp__openclaw__exec",
+        "input": {
+            "command": "echo LS-BEGIN; echo host=$(hostname); "
+            "cat claude-tool-test.txt claude-patch-test.txt; echo LS-END"
+        },
+    },
+]
+
+# The native tools of Claude Code that run code, write files, read files or
+# fetch URLs. Each one runs in the process of Claude Code, so in the agent pod.
+CLAUDE_NATIVE_STEPS = [
+    {"tool": "Bash", "input": {"command": "@@PROBE@@", "description": "probe"}},
+    {
+        "tool": "Write",
+        "input": {
+            "file_path": "/tmp/native-write-@@NATIVE_MARK@@.txt",
+            "content": "NATIVE-WRITE @@NATIVE_MARK@@\n",
+        },
+    },
+    {
+        "tool": "Edit",
+        "input": {
+            "file_path": "/tmp/native-write-@@NATIVE_MARK@@.txt",
+            "old_string": "NATIVE-WRITE",
+            "new_string": "NATIVE-EDIT",
+        },
+    },
+    {"tool": "Read", "input": {"file_path": "/home/node/.openclaw/openclaw.json"}},
+    {
+        "tool": "Glob",
+        "input": {"pattern": "**/*", "path": "/home/node/.openclaw/credentials"},
+    },
+    {
+        "tool": "Grep",
+        "input": {"pattern": "marker", "path": "/home/node/.openclaw/credentials"},
+    },
+    {
+        "tool": "WebFetch",
+        "input": {
+            "url": "@@MOCK_URL@@/native-webfetch-@@NATIVE_MARK@@",
+            "prompt": "Return the text.",
+        },
+    },
+    {"tool": "WebSearch", "input": {"query": "native-websearch-@@NATIVE_MARK@@"}},
+    {
+        "tool": "NotebookEdit",
+        "input": {
+            "notebook_path": "/tmp/native-@@NATIVE_MARK@@.ipynb",
+            "new_source": "print(1)",
+            "cell_type": "code",
+            "edit_mode": "insert",
+        },
+    },
+    {
+        "tool": "Agent",
+        "input": {
+            "description": "probe",
+            "prompt": "NATIVE-AGENT-@@NATIVE_MARK@@",
+            "subagent_type": "general-purpose",
+            "run_in_background": False,
+        },
+    },
+    {
+        "tool": "Task",
+        "input": {
+            "description": "probe",
+            "prompt": "NATIVE-AGENT-@@NATIVE_MARK@@",
+            "subagent_type": "general-purpose",
+            "run_in_background": False,
+        },
+    },
+    {
+        "tool": "Workflow",
+        "input": {
+            "script": "export const meta = { name: 'probe', description: 'probe' }\n"
+            "const r = await agent('NATIVE-AGENT-@@NATIVE_MARK@@', { label: 'probe' })\n"
+            "return { r }\n"
+        },
+    },
+]
+
+PLANS["claude-main"] = CLAUDE_MCP_STEPS + CLAUDE_NATIVE_STEPS
+PLANS["claude-native"] = CLAUDE_NATIVE_STEPS
+PLANS["claude-mcp"] = CLAUDE_MCP_STEPS
+
+# The ids of the messages of the mock. Claude Code keys its transcript by
+# message id, so each answer has its own.
+MESSAGE_IDS = itertools.count(1)
+
 
 def placeholders(marks, results):
     values = [v for v in os.environ.get("MOCK_SECRET_VALUES", "").split(",") if v]
@@ -176,6 +315,10 @@ def placeholders(marks, results):
         "@@PROBE@@": probe,
         "@@WRITE_MARK@@": marks["write"],
         "@@TRACE_MARK@@": marks["trace"],
+        "@@NATIVE_MARK@@": marks.get("native", "none"),
+        "@@MOCK_URL@@": os.environ.get(
+            "MOCK_SELF_URL", "http://mock-model.test-support.svc.cluster.local:8000"
+        ),
         "@@SESSION_ID@@": session or "no-session-id",
     }
 
@@ -253,7 +396,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
         self.wfile.flush()
 
+    def request_facts(self):
+        """Where the request came in, with which key, from which client."""
+        auth = self.headers.get("x-api-key") or ""
+        bearer = self.headers.get("authorization") or ""
+        if bearer.lower().startswith("bearer "):
+            auth = auth or bearer[7:]
+        label = "none" if not auth else "unknown"
+        for entry in os.environ.get("MOCK_GATEWAY_KEYS", "").split(","):
+            name, _, value = entry.partition("=")
+            if value and auth == value:
+                label = name
+        return {
+            "path": self.path.split("?", 1)[0],
+            "route": self.path.split("/v1/", 1)[0] if "/v1/" in self.path else None,
+            "gateway_key": label,
+            "user_agent": (self.headers.get("user-agent") or "").split(" ", 1)[0],
+        }
+
     def do_GET(self):
+        print(json.dumps(dict(self.request_facts(), api="get")), flush=True)
         if "models" in self.path:
             self._json(
                 200,
@@ -292,6 +454,34 @@ class Handler(BaseHTTPRequestHandler):
             )
         return self.messages(body)
 
+    def claude_step(self, steps, offered, uses, marks, results):
+        """The next step of a plan for Claude Code, and whether the tool was
+        asked for although Claude Code did not offer it."""
+        if not offered:
+            return None, None
+        done = [u for u in uses if u["name"] != "ToolSearch"]
+        if len(done) >= len(steps):
+            return None, None
+        index = len(done)
+        step = steps[index]
+        tool = step["tool"]
+        just_loaded = bool(uses) and uses[-1]["name"] == "ToolSearch"
+        if tool not in offered and "ToolSearch" in offered and not just_loaded:
+            block = {
+                "type": "tool_use",
+                "id": f"toolu_load{len(uses):02d}",
+                "name": "ToolSearch",
+                "input": {"query": f"select:{tool}", "max_results": 5},
+            }
+            return block, None
+        block = {
+            "type": "tool_use",
+            "id": f"toolu_mock{index:02d}",
+            "name": tool,
+            "input": fill(step["input"], placeholders(marks, results)),
+        }
+        return block, tool not in offered
+
     def messages(self, body):
         texts = user_texts(body)
         offered = [t.get("name") for t in body.get("tools") or []]
@@ -313,10 +503,14 @@ class Handler(BaseHTTPRequestHandler):
             "trace": find(r"TRACEMARK=([A-Za-z0-9-]+)", texts) or "none",
         }
         outmark = find(r"OUTMARK=([A-Za-z0-9-]+)", texts)
+        marks["native"] = find(r"NATIVEMARK=([A-Za-z0-9-]+)", texts) or "none"
 
         block = None
+        forced = None
         steps = PLANS.get(plan_name or "", [])
-        if len(uses) < len(steps):
+        if plan_name and plan_name.startswith("claude-"):
+            block, forced = self.claude_step(steps, offered, uses, marks, results)
+        elif len(uses) < len(steps):
             # One step for each request: the step after the calls so far.
             step = steps[len(uses)]
             if step["tool"] in offered:
@@ -337,12 +531,17 @@ class Handler(BaseHTTPRequestHandler):
 
         record = {
             "ts": time.strftime("%H:%M:%S"),
+            **self.request_facts(),
+            # A subagent of Claude Code: the mark of its prompt.
+            "subagent": find(r"NATIVE-AGENT-([A-Za-z0-9-]+)", texts),
+            "forced": forced,
             "model": body.get("model"),
             "stream": bool(body.get("stream")),
             "auth_header": "x-api-key"
             if self.headers.get("x-api-key")
             else ("authorization" if self.headers.get("authorization") else "none"),
             "plan": plan_name,
+            "marks": {k: v for k, v in marks.items() if v != "none"},
             "tools_offered": offered,
             "tool_uses": uses,
             "tool_results": results,
@@ -360,7 +559,7 @@ class Handler(BaseHTTPRequestHandler):
             "output_tokens": 22,
         }
         msg = {
-            "id": "msg_mock01",
+            "id": f"msg_mock{next(MESSAGE_IDS):04d}",
             "type": "message",
             "role": "assistant",
             "model": body.get("model", "claude-test"),

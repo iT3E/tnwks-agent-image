@@ -70,6 +70,7 @@ repository.
 | OpenShell | `Dockerfile`, the `openshell-release` stage | Renovate, tag and digest. The CLI in the image, and the chart and images of the test cluster, follow it |
 | The images of the test cluster | [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. A change there makes no release |
 | kind, helm, kubectl | [`tests/kind/up.sh`](tests/kind/up.sh), a version and a sha256 each | By hand, from the checksum file of each release. Renovate does not read files under `tests/` |
+| Claude Code (the test layer of the Claude CLI test only) | [`.github/workflows/claude-cli.yaml`](.github/workflows/claude-cli.yaml), `CLAUDE_CODE_VERSION` | Renovate (npm). Not in the image that ships |
 
 ## The tests
 
@@ -120,6 +121,22 @@ prints the pods, the events and the logs to the job log.
 Never run the kind part on a workstation that runs a live cluster.
 `bin/image-test` makes the cluster only when `CI=true` or
 `IMAGE_TEST_KIND=1`.
+
+### The Claude CLI test
+
+The workflow [`claude-cli.yaml`](.github/workflows/claude-cli.yaml) is a job
+of its own, so its result hides no result of the image job. It tests
+OpenClaw's Claude CLI runtime (`agentRuntime: { id: "claude-cli" }`) behind a
+model gateway, on the test cluster with the agent pod of
+`manifests.py claude-agent`. The image that ships holds no Claude Code: the
+job adds it in a test layer ([`tests/claude-cli/Dockerfile`](tests/claude-cli/Dockerfile)),
+at the version that the workflow pins for Renovate.
+[`tests/test_claude_cli.py`](tests/test_claude_cli.py) records where the
+model calls go (the mock, the network policy of the pod, the log of the
+cluster DNS), where each OpenClaw tool runs when it comes through the MCP
+bridge, and which Claude Code native tools the model can reach. It writes
+what it finds to the job summary. It fails only when the harness can not
+give the evidence: a finding is a result, not a failure.
 
 ## Workflow
 

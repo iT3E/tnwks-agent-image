@@ -5,6 +5,10 @@
 #
 # Usage: tests/kind/up.sh <image ref> <work dir>
 #
+# IMAGE_TEST_AGENT_MODE picks the agent pod: `agent` (the default) or
+# `claude-agent` (the Claude CLI test, tests/claude-cli/run.sh). The second
+# one also turns on the query log of the cluster DNS.
+#
 # It runs in CI only. The kubeconfig of the cluster is a file in the work dir,
 # and each kubectl and helm call names it, so no call can reach another
 # cluster. tests/kind/down.sh deletes the cluster.
@@ -12,6 +16,11 @@ set -euo pipefail
 
 image="${1:?usage: up.sh <image ref> <work dir>}"
 work="${2:?usage: up.sh <image ref> <work dir>}"
+agent_mode="${IMAGE_TEST_AGENT_MODE:-agent}"
+case "$agent_mode" in
+  agent | claude-agent) ;;
+  *) echo "up.sh: unknown IMAGE_TEST_AGENT_MODE '$agent_mode'" >&2; exit 1 ;;
+esac
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cluster=tnwks-image-test
 
@@ -113,7 +122,27 @@ python3 "$repo/tests/kind/manifests.py" support "$image" | kx apply -f -
 kx -n test-support rollout status deploy/mock-model --timeout=300s
 kx -n test-support rollout status deploy/otelcol --timeout=300s
 
-step "the agent pod"
+if [[ "$agent_mode" == claude-agent ]]; then
+  step "the query log of the cluster DNS"
+  kx -n kube-system get configmap coredns -o json | python3 -c '
+import json, sys
+cm = json.load(sys.stdin)
+lines = cm["data"]["Corefile"].splitlines()
+out = []
+for line in lines:
+    out.append(line)
+    if line.strip().startswith(".:53") and line.rstrip().endswith("{"):
+        out.append("    log")
+cm["data"]["Corefile"] = "\n".join(out) + "\n"
+for key in ("resourceVersion", "uid", "creationTimestamp", "managedFields"):
+    cm["metadata"].pop(key, None)
+print(json.dumps(cm))
+' | kx apply -f -
+  kx -n kube-system rollout restart deploy/coredns
+  kx -n kube-system rollout status deploy/coredns --timeout=180s
+fi
+
+step "the agent pod ($agent_mode)"
 # The client certificate of the OpenShell gateway, as the ops repository
 # gives it to the agent namespace.
 kx -n openshell get secret openshell-client-tls -o json | python3 -c '
@@ -122,7 +151,7 @@ s = json.load(sys.stdin)
 print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": s.get("type", "Opaque"),
                   "metadata": {"name": "openshell-client-tls", "namespace": "agent"}, "data": s["data"]}))
 ' | kx apply -f -
-python3 "$repo/tests/kind/manifests.py" agent "$image" | kx apply -f -
+python3 "$repo/tests/kind/manifests.py" "$agent_mode" "$image" | kx apply -f -
 kx -n agent wait --for=condition=Ready pod/agent --timeout=420s
 
 step "ready"

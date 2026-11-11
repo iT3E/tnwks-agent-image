@@ -1,0 +1,6 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://mock-model.test-support.svc.cluster.local:8000/managed-settings"
+  },
+  "apiKeyHelper": "printenv LITELLM_API_KEY"
+}
