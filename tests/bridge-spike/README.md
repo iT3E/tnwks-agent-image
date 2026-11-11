@@ -1,0 +1,73 @@
+# The bridge spike
+
+Test code only. It is not part of the image, and it is not a product.
+
+`bridge.mjs` is a small HTTP service that serves the Anthropic Messages API
+(`POST /v1/messages`, JSON and SSE) and `GET /health`. It runs each
+conversation through the unmodified Claude Agent SDK
+(`@anthropic-ai/claude-agent-sdk`, pinned in `package.json` and
+`package-lock.json`), so the Claude Code engine makes the upstream model
+call. The CI test is `tests/test_bridge_spike.py`, run by
+`.github/workflows/bridge-spike.yaml`.
+
+## Run it on its own
+
+You need Node 22 or later. The SDK must be able to reach its upstream with its
+own sign-in. The bridge sets no upstream and holds no credential.
+
+```sh
+cd tests/bridge-spike
+npm ci --omit=dev
+PORT=8080 node bridge.mjs
+```
+
+`PORT` is optional (default 8080). Nothing else is required. A client then
+uses `http://127.0.0.1:8080` as its Anthropic base URL, with any key: the
+bridge does not check it and never forwards it. `BRIDGE_IDLE_SECONDS`
+(default 900) closes a conversation that has been idle that long.
+
+In CI, the SDK gets `ANTHROPIC_BASE_URL` (the mock model) and a fake
+`ANTHROPIC_API_KEY` from the pod environment.
+
+## The mapping
+
+- **System prompt.** The client's `system` becomes the SDK's `systemPrompt`:
+  a string stays a string, and text blocks become a `string[]` (their
+  `cache_control` is not carried). This is the SDK's custom prompt, not the
+  `claude_code` preset. The CI job records what the engine sends around it.
+- **Tools.** The client's `tools` are offered through one in-process MCP
+  server named `client`. Its `tools/list` returns the client's JSON Schema
+  as written, with `_meta["anthropic/alwaysLoad"]`, so that the engine does
+  not defer a tool behind its tool search. The engine names a tool
+  `mcp__client__<name>`. The bridge gives the client back its own name.
+- **Tool calls.** The bridge runs no tool itself. When a model call ends with
+  `stop_reason: "tool_use"`, the bridge ends the HTTP response with those
+  blocks. The SDK session stays open, and the MCP handler of each call waits.
+  The client's next request brings `tool_result` blocks, and the bridge
+  resolves each handler by its tool_use id. With more than one call in an
+  answer, a result that comes before its handler call is kept until that
+  call.
+- **Off.** Claude Code's built-in tools are off (`tools: []`), with
+  `settingSources: []`, `skills: []`, no hooks, `strictMcpConfig`,
+  `permissionMode: "dontAsk"` with only the `client` server allowed,
+  `persistSession: false`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+  `verbatimPrompts: true` turns off the engine's turn-start attachments
+  (file mentions, slash commands, reminders) on a prompt.
+- **Other fields.** `model` goes to the SDK's `model`, and `max_tokens` to
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS` of the session. `thinking` is mapped to the
+  SDK's `thinking` (disabled when the client does not ask). `temperature`,
+  `top_p`, `top_k`, `stop_sequences`, `tool_choice` and `metadata` are not
+  carried; the bridge logs them as dropped.
+- **Sessions.** There is one SDK session (one Claude Code process) for each
+  conversation. The bridge matches a request to its session by the tool_use
+  ids of the last assistant message. If those do not match, it uses a hash of
+  the conversation as the client has it (its text, tool_use ids and
+  tool_result ids).
+- **A request with history but no live session** (a restart, another
+  replica, or tools that changed) starts a new session. Its first prompt
+  holds the history as text, after one line that says so. The structured
+  tool calls, thinking, images of earlier turns and the engine's own context
+  are lost.
+- **Identity.** The bridge sets `CLAUDE_AGENT_SDK_CLIENT_APP`, the SDK's
+  documented way to name the app that uses it. It adds nothing to look like
+  another client, and removes nothing from the client's prompt.

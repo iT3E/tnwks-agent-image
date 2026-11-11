@@ -5,9 +5,12 @@
 #
 # Usage: tests/kind/up.sh <image ref> <work dir>
 #
-# IMAGE_TEST_AGENT_MODE picks the agent pod: `agent` (the default) or
-# `claude-agent` (the Claude CLI test, tests/claude-cli/run.sh). The second
-# one also turns on the query log of the cluster DNS.
+# IMAGE_TEST_AGENT_MODE picks the agent pod: `agent` (the default),
+# `claude-agent` (the Claude CLI test, tests/claude-cli/run.sh), or
+# `bridge-agent` (the bridge spike, tests/bridge-spike/run.sh). The second
+# one also turns on the query log of the cluster DNS. The third one also
+# loads the image of the bridge (BRIDGE_IMAGE) and starts the bridge and
+# LiteLLM in the test support namespace.
 #
 # It runs in CI only. The kubeconfig of the cluster is a file in the work dir,
 # and each kubectl and helm call names it, so no call can reach another
@@ -18,7 +21,7 @@ image="${1:?usage: up.sh <image ref> <work dir>}"
 work="${2:?usage: up.sh <image ref> <work dir>}"
 agent_mode="${IMAGE_TEST_AGENT_MODE:-agent}"
 case "$agent_mode" in
-  agent | claude-agent) ;;
+  agent | claude-agent | bridge-agent) ;;
   *) echo "up.sh: unknown IMAGE_TEST_AGENT_MODE '$agent_mode'" >&2; exit 1 ;;
 esac
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -121,6 +124,16 @@ step "the mock model server and the trace collector"
 python3 "$repo/tests/kind/manifests.py" support "$image" | kx apply -f -
 kx -n test-support rollout status deploy/mock-model --timeout=300s
 kx -n test-support rollout status deploy/otelcol --timeout=300s
+
+if [[ "$agent_mode" == bridge-agent ]]; then
+  bridge_image="${BRIDGE_IMAGE:?bridge-agent needs BRIDGE_IMAGE}"
+  step "the bridge spike: $bridge_image, and LiteLLM"
+  kind load docker-image "$bridge_image" --name "$cluster"
+  python3 "$repo/tests/kind/manifests.py" bridge "$bridge_image" | kx apply -f -
+  kx -n test-support rollout status deploy/bridge --timeout=300s
+  # LiteLLM is optional: the test reports it as not covered when it is not
+  # ready.
+fi
 
 if [[ "$agent_mode" == claude-agent ]]; then
   step "the query log of the cluster DNS"

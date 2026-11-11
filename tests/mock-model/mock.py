@@ -28,6 +28,7 @@ its path, so a test can see a fetch of a marker URL.
 It started from the mock server of the spikes of effort 0003 in tnwks-coe.
 """
 
+import hashlib
 import itertools
 import json
 import os
@@ -337,9 +338,77 @@ PLANS["claude-mcp"] = CLAUDE_MCP_STEPS
 PLANS["claude-sbx"] = CLAUDE_SBX_STEPS
 PLANS["claude-sbx-host"] = CLAUDE_SBX_HOST_STEPS
 
+# The plans of the bridge spike (tests/test_bridge_spike.py). The bridge runs
+# the conversation through the Claude Agent SDK, which offers a client tool
+# `x` as `mcp__client__x`, so a step names the tool of the client and the
+# mock asks for the offered tool whose name is `x` or ends in `__x`. A bridge
+# plan is a list of turns: each turn is the tool calls of one answer (two
+# calls in one answer are two tool_use blocks), and the turn index is the
+# number of answers with a tool call in the history. After the last turn the
+# answer is text.
+BRIDGE_PLANS = {
+    # An OpenClaw turn: a file tool, then a command that reads the file (a
+    # chain of two steps), then two calls in one answer.
+    "bridge-tools": [
+        [
+            {
+                "tool": "write",
+                "input": {
+                    "path": "bridge-test.txt",
+                    "content": "BRIDGE-WRITE @@WRITE_MARK@@\n",
+                },
+            }
+        ],
+        [
+            {
+                "tool": "exec",
+                "input": {
+                    "command": "echo CHAIN-BEGIN; echo host=$(hostname); "
+                    "cat bridge-test.txt; echo CHAIN-END"
+                },
+            }
+        ],
+        [
+            {"tool": "exec", "input": {"command": "@@PROBE@@", "yieldMs": 120000}},
+            {"tool": "read", "input": {"path": "bridge-test.txt"}},
+        ],
+    ],
+    # A plain Messages API client with one tool: two calls in one answer.
+    "bridge-client": [
+        [
+            {"tool": "get_weather", "input": {"city": "Paris"}},
+            {"tool": "get_weather", "input": {"city": "Oslo"}},
+        ],
+    ],
+    # One call, for the restart and the latency checks.
+    "bridge-one": [
+        [{"tool": "get_weather", "input": {"city": "Rome"}}],
+    ],
+}
+# A plan whose name is here answers with a thinking block before its text.
+THINKING_PLANS = {"bridge-blocks"}
+# The request headers that the mock records with their value. Others are
+# recorded by name; a key is never recorded.
+SHOWN_HEADERS = (
+    "user-agent",
+    "x-app",
+    "anthropic-version",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "x-stainless-lang",
+    "x-stainless-package-version",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-retry-count",
+    "x-stainless-timeout",
+    "x-claude-code-session-id",
+    "x-client-request-id",
+)
+
 # The ids of the messages of the mock. Claude Code keys its transcript by
 # message id, so each answer has its own.
 MESSAGE_IDS = itertools.count(1)
+TOOL_IDS = itertools.count(1)
 
 
 def placeholders(marks, results):
@@ -427,6 +496,88 @@ def find(pattern, texts):
         if m:
             return m.group(1)
     return None
+
+
+def short_text(text, n=1500):
+    text = text or ""
+    return text if len(text) <= n else text[:n] + f"...[{len(text)} chars]"
+
+
+def digest(text):
+    return hashlib.sha256((text or "").encode()).hexdigest()[:16]
+
+
+def bridge_facts(handler, body):
+    """What reached the mock, in full, for the bridge spike."""
+    system = body.get("system")
+    if isinstance(system, str):
+        system = [{"type": "text", "text": system}]
+    system = system or []
+    tools = body.get("tools") or []
+    raw = json.dumps(body)
+    return {
+        "headers": {
+            k.lower(): (v if k.lower() in SHOWN_HEADERS else "(set)")
+            for k, v in handler.headers.items()
+            if k.lower() not in ("x-api-key", "authorization", "content-length")
+        },
+        "system_blocks": [
+            {
+                "chars": len(b.get("text", "")),
+                "sha": digest(b.get("text", "")),
+                "cache_control": "cache_control" in b,
+                "text": short_text(b.get("text", ""), 600),
+            }
+            for b in system
+            if isinstance(b, dict)
+        ],
+        "tool_names": [t.get("name") or t.get("type") for t in tools],
+        "tool_schemas": {
+            t.get("name"): t.get("input_schema")
+            for t in tools
+            if str(t.get("name", "")).endswith(("get_weather", "__exec", "__read"))
+        },
+        "tool_extras": sorted(
+            {
+                k
+                for t in tools
+                for k in t
+                if k not in ("name", "description", "input_schema")
+            }
+        ),
+        "max_tokens": body.get("max_tokens"),
+        "thinking": body.get("thinking"),
+        "temperature": body.get("temperature"),
+        "tool_choice": body.get("tool_choice"),
+        "metadata_keys": sorted((body.get("metadata") or {}).keys()),
+        "other_keys": sorted(
+            k
+            for k in body
+            if k not in ("model", "messages", "system", "tools", "max_tokens", "stream")
+        ),
+        "cache_control_marks": raw.count('"cache_control"'),
+        "messages": [
+            {
+                "role": m.get("role"),
+                "blocks": [m["content"]]
+                if isinstance(m.get("content"), str)
+                else [
+                    b.get("type") for b in m.get("content") or [] if isinstance(b, dict)
+                ],
+            }
+            for m in body.get("messages") or []
+        ],
+        "first_user_text": short_text(
+            text_of((body.get("messages") or [{}])[0].get("content")), 2500
+        ),
+    }
+
+
+def bridge_tool(name, offered):
+    """The offered tool for a tool name of a bridge plan."""
+    if name in offered:
+        return name
+    return next((o for o in offered if o.endswith("__" + name)), None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -533,6 +684,147 @@ class Handler(BaseHTTPRequestHandler):
         }
         return block, tool not in offered
 
+    def bridge_answer(self, body, plan_name, marks, outmark, offered, uses, results):
+        """An answer for the bridge spike: a turn of a bridge plan, or text."""
+        turns = BRIDGE_PLANS.get(plan_name or "", [])
+        done = sum(
+            1
+            for m in body.get("messages") or []
+            if m.get("role") == "assistant"
+            and isinstance(m.get("content"), list)
+            and any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in m["content"]
+            )
+        )
+        content = []
+        if offered and done < len(turns):
+            table = placeholders(marks, results)
+            for step in turns[done]:
+                name = bridge_tool(step["tool"], offered)
+                if not name:
+                    content = [
+                        {"type": "text", "text": f"MOCK-NOT-OFFERED {step['tool']}"}
+                    ]
+                    break
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"toolu_bridge{next(TOOL_IDS):05d}",
+                        "name": name,
+                        "input": fill(step["input"], table),
+                    }
+                )
+        if not content:
+            final = "MOCK-FINAL" if plan_name else "MOCK-OK"
+            if plan_name in THINKING_PLANS:
+                content.append(
+                    {
+                        "type": "thinking",
+                        "thinking": "MOCK-THINKING",
+                        "signature": "mock-signature-0001",
+                    }
+                )
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"{final} OUTMARK-{outmark}" if outmark else final,
+                }
+            )
+        record = {
+            "ts": time.strftime("%H:%M:%S"),
+            **self.request_facts(),
+            "model": body.get("model"),
+            "stream": bool(body.get("stream")),
+            "auth_header": "x-api-key"
+            if self.headers.get("x-api-key")
+            else ("authorization" if self.headers.get("authorization") else "none"),
+            "plan": plan_name,
+            "turn": done,
+            "marks": {k: v for k, v in marks.items() if v != "none"},
+            "tools_offered": offered,
+            "tool_uses": uses,
+            "tool_results": results,
+            "answer": [
+                b.get("name") or b.get("text") or b.get("type") for b in content
+            ],
+            "bridge": bridge_facts(self, body),
+        }
+        print(json.dumps(record), flush=True)
+        self.reply(body, content)
+
+    def reply(self, body, content):
+        """Send an answer of one or more content blocks, as JSON or SSE."""
+        stop = (
+            "tool_use" if any(b["type"] == "tool_use" for b in content) else "end_turn"
+        )
+        usage = {
+            "input_tokens": 11,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 22,
+        }
+        msg = {
+            "id": f"msg_mock{next(MESSAGE_IDS):04d}",
+            "type": "message",
+            "role": "assistant",
+            "model": body.get("model", "claude-test"),
+            "content": content,
+            "stop_reason": stop,
+            "stop_sequence": None,
+            "usage": usage,
+        }
+        if not body.get("stream"):
+            return self._json(200, msg)
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.send_header("connection", "close")
+        self.end_headers()
+        start = dict(
+            msg, content=[], stop_reason=None, usage=dict(usage, output_tokens=1)
+        )
+        self._event("message_start", {"type": "message_start", "message": start})
+        for i, block in enumerate(content):
+            if block["type"] == "text":
+                first = {"type": "text", "text": ""}
+                deltas = [{"type": "text_delta", "text": block["text"]}]
+            elif block["type"] == "thinking":
+                first = {"type": "thinking", "thinking": "", "signature": ""}
+                deltas = [
+                    {"type": "thinking_delta", "thinking": block["thinking"]},
+                    {"type": "signature_delta", "signature": block["signature"]},
+                ]
+            else:
+                first = dict(block, input={})
+                deltas = [
+                    {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(block["input"]),
+                    }
+                ]
+            self._event(
+                "content_block_start",
+                {"type": "content_block_start", "index": i, "content_block": first},
+            )
+            for delta in deltas:
+                self._event(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": i, "delta": delta},
+                )
+            self._event(
+                "content_block_stop", {"type": "content_block_stop", "index": i}
+            )
+        self._event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop, "stop_sequence": None},
+                "usage": usage,
+            },
+        )
+        self._event("message_stop", {"type": "message_stop"})
+
     def messages(self, body):
         texts = user_texts(body)
         offered = [t.get("name") for t in body.get("tools") or []]
@@ -555,6 +847,13 @@ class Handler(BaseHTTPRequestHandler):
         }
         outmark = find(r"OUTMARK=([A-Za-z0-9-]+)", texts)
         marks["native"] = find(r"NATIVEMARK=([A-Za-z0-9-]+)", texts) or "none"
+        route = self.request_facts()["route"] or ""
+        if route.startswith(("/bridge", "/direct")) or (plan_name or "") in (
+            set(BRIDGE_PLANS) | THINKING_PLANS
+        ):
+            return self.bridge_answer(
+                body, plan_name, marks, outmark, offered, uses, results
+            )
 
         block = None
         forced = None
