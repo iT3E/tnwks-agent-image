@@ -1,0 +1,12 @@
+# The plugin list: the npm packages of the OpenClaw plugins that the image
+# holds, one name for each line. The Dockerfile installs each one at the
+# release of the product, so one update moves the product and its plugins.
+# A plugin goes in at build time only. The agent can not install one.
+#
+# The plugin id, which the config names, is in the comment.
+
+# openshell: the sandbox backend. Each shell and file tool runs in a sandbox.
+@openclaw/openshell-sandbox
+
+# signal: the Signal channel. It talks to the Signal daemon of the trust domain.
+@openclaw/signal

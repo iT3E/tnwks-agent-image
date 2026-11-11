@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# The image test. The image job of CI (build.yaml) runs it on the image that
+# it built, before any push: a failed test means no image.
+#
+# Usage: bin/image-test <image ref>
+#
+# 1. The checks that need Docker only (tests/test_image.py). They run on a
+#    workstation too (`task test`).
+# 2. In CI only: a kind cluster with the sandbox layer at the pinned release,
+#    a mock model server and a trace collector (tests/kind/up.sh). Then the
+#    tool test (tests/test_tools.py) and the trace test (tests/test_traces.py).
+#    Never set IMAGE_TEST_KIND=1 on a workstation that runs a live cluster.
+set -euo pipefail
+
+image="${1:?usage: bin/image-test <image ref>}"
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+export IMAGE_REF="$image"
+export PYTHONDONTWRITEBYTECODE=1
+
+echo "== the image: $image"
+(cd "$repo/tests" && python3 -m unittest -v test_image)
+
+if [[ "${CI:-}" != "true" && "${IMAGE_TEST_KIND:-}" != "1" ]]; then
+  echo "== the tool test and the trace test run in CI only, on a kind cluster: skipped"
+  exit 0
+fi
+
+work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/image-test.XXXXXX")"
+finish() {
+  local status=$?
+  if ((status != 0)); then
+    "$repo/tests/kind/dump.sh" "$work" || true
+  fi
+  "$repo/tests/kind/down.sh" "$work" || true
+  rm -rf "$work"
+  exit "$status"
+}
+trap finish EXIT
+
+"$repo/tests/kind/up.sh" "$image" "$work"
+
+export IMAGE_TEST_KUBECONFIG="$work/kubeconfig"
+export IMAGE_TEST_KUBECTL="$work/bin/kubectl"
+echo "== the tool test and the trace test"
+(cd "$repo/tests" && python3 -m unittest -v test_tools test_traces)
