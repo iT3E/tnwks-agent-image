@@ -8,7 +8,10 @@
   },
   "update": {"checkOnStart": false},
   "cron": {"enabled": false},
-  "tools": {"elevated": {"enabled": false}},
+  "tools": {
+    "elevated": {"enabled": false},
+    "sandbox": {"tools": {"alsoAllow": ["sandbox_exec"]}}
+  },
   "env": {
     "vars": {
       "ANTHROPIC_BASE_URL": "http://mock-model.test-support.svc.cluster.local:8000/env-vars",
@@ -39,6 +42,14 @@
       "gwexec": {
         "workspace": "~/.openclaw/workspace-gwexec",
         "tools": {"exec": {"mode": "full"}}
+      },
+      "noshell": {
+        "workspace": "~/.openclaw/workspace-noshell",
+        "tools": {"deny": ["sandbox_exec"]}
+      },
+      "narrow": {
+        "workspace": "~/.openclaw/workspace-narrow",
+        "tools": {"allow": ["read"]}
       }
     }
   },
@@ -46,10 +57,12 @@
     "load": {
       "paths": [
         "/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox",
-        "/opt/openclaw/plugins/node_modules/@openclaw/signal"
+        "/opt/openclaw/plugins/node_modules/@openclaw/signal",
+        "/opt/openclaw/plugins/node_modules/@tnwks-test/sandbox-exec"
       ]
     },
     "entries": {
+      "tnwks-sandbox-exec": {"enabled": true},
       "anthropic": {
         "enabled": true,
         "config": {

@@ -282,9 +282,60 @@ CLAUDE_NATIVE_STEPS = [
     },
 ]
 
+# The spike plugin tool `sandbox_exec` (tests/claude-cli/sandbox-exec). The
+# file tools write into the workspace of the agent; the commands show whether
+# the sandbox sees that file, and whether its own file comes back. Then the
+# exec tool of OpenClaw and the native Bash, which must stay off, and a
+# command that runs past its time limit.
+CLAUDE_SBX_STEPS = [
+    {
+        "tool": "mcp__openclaw__write",
+        "input": {"path": "sbx-in.txt", "content": "MIRROR-IN @@WRITE_MARK@@\n"},
+    },
+    {"tool": "mcp__openclaw__sandbox_exec", "input": {"command": "@@PROBE@@"}},
+    {
+        "tool": "mcp__openclaw__sandbox_exec",
+        "input": {
+            "command": "echo SBX-BEGIN; echo host=$(hostname); echo pwd=$(pwd); "
+            "cat sbx-in.txt; echo 'MIRROR-OUT @@WRITE_MARK@@' > sbx-out.txt; "
+            "ls -la; echo SBX-END"
+        },
+    },
+    {"tool": "mcp__openclaw__read", "input": {"path": "sbx-out.txt"}},
+    {
+        "tool": "mcp__openclaw__exec",
+        "input": {"command": "echo EXEC-RAN host=$(hostname)"},
+    },
+    {"tool": "Bash", "input": {"command": "echo BASH-RAN", "description": "probe"}},
+    {
+        "tool": "mcp__openclaw__sandbox_exec",
+        "input": {"command": "sleep 20; echo SLEPT", "timeoutSeconds": 3},
+    },
+    # Is the command that timed out still running in the sandbox? The pattern
+    # is in two parts, so that this command does not count itself.
+    {
+        "tool": "mcp__openclaw__sandbox_exec",
+        "input": {
+            "command": "echo SBX-AGAIN host=$(hostname); "
+            "echo left_running=$(for f in /proc/[0-9]*/cmdline; do "
+            "tr '\\0' ' ' < $f 2>/dev/null; echo; done | grep -c '^sle''ep 20')"
+        },
+    },
+]
+
+# A second session of the same agent: which sandbox does it get?
+CLAUDE_SBX_HOST_STEPS = [
+    {
+        "tool": "mcp__openclaw__sandbox_exec",
+        "input": {"command": "echo SBX-AGAIN host=$(hostname); ls"},
+    },
+]
+
 PLANS["claude-main"] = CLAUDE_MCP_STEPS + CLAUDE_NATIVE_STEPS
 PLANS["claude-native"] = CLAUDE_NATIVE_STEPS
 PLANS["claude-mcp"] = CLAUDE_MCP_STEPS
+PLANS["claude-sbx"] = CLAUDE_SBX_STEPS
+PLANS["claude-sbx-host"] = CLAUDE_SBX_HOST_STEPS
 
 # The ids of the messages of the mock. Claude Code keys its transcript by
 # message id, so each answer has its own.
