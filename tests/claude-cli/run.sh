@@ -6,7 +6,8 @@
 # Usage: tests/claude-cli/run.sh <test image ref>
 #
 # It makes the test cluster of tests/kind/up.sh with the agent pod of the
-# Claude CLI test, runs tests/test_claude_cli.py, and deletes the cluster.
+# Claude CLI test, runs tests/test_claude_cli.py and the sandbox_exec spike
+# (tests/test_sandbox_exec.py), and deletes the cluster.
 # Never run it on a workstation that runs a live cluster.
 set -euo pipefail
 
@@ -37,4 +38,4 @@ IMAGE_TEST_AGENT_MODE=claude-agent "$repo/tests/kind/up.sh" "$image" "$work"
 export IMAGE_TEST_KUBECONFIG="$work/kubeconfig"
 export IMAGE_TEST_KUBECTL="$work/bin/kubectl"
 echo "== the Claude CLI test"
-(cd "$repo/tests" && python3 -m unittest -v test_claude_cli)
+(cd "$repo/tests" && python3 -m unittest -v test_claude_cli test_sandbox_exec)

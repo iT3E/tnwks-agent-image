@@ -138,6 +138,16 @@ bridge, and which Claude Code native tools the model can reach. It writes
 what it finds to the job summary. It fails only when the harness can not
 give the evidence: a finding is a result, not a failure.
 
+The same job runs a spike on the same cluster:
+[`tests/test_sandbox_exec.py`](tests/test_sandbox_exec.py). The test layer
+also holds a small plugin ([`tests/claude-cli/sandbox-exec`](tests/claude-cli/sandbox-exec))
+that registers the tool `sandbox_exec`. The tool runs one command in the
+OpenShell sandbox of the session, through the public plugin SDK. The test
+records whether a Claude CLI turn gets the tool, where the command runs,
+what happens to the workspace, which sandbox each call gets and who deletes
+it, and whether a per-agent tool policy removes the tool. The plugin is a
+spike: the image that ships does not hold it.
+
 ## Workflow
 
 This repo follows the app-repo standard in
