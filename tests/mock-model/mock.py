@@ -166,8 +166,10 @@ def placeholders(marks, results):
     probe = probe.replace("@@FILE_MARKER_1@@", marker[:half]).replace(
         "@@FILE_MARKER_2@@", marker[half:]
     )
+    # The exec tool names a command in the background as `(session <id>,`,
+    # and a JSON result as `"sessionId": "<id>"`.
     session = find(
-        r'"?sessionId"?\s*[:=]\s*"?([A-Za-z0-9_.:-]+)',
+        r'(?:\(session |"?sessionId"?\s*[:=]\s*"?)([A-Za-z0-9_.:-]+)',
         [r["text"] for r in reversed(results)],
     )
     return {

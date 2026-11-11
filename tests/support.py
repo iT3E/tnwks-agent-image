@@ -142,7 +142,9 @@ def probe_command():
 def parse_probes(text):
     """Each probe output in a text, as a dict of its `key=value` lines."""
     out = []
-    for block in re.findall(r"PROBE-BEGIN\n(.*?)PROBE-END", text or "", re.DOTALL):
+    # A result in JSON (dispatch_action) has each newline as `\n`.
+    text = (text or "").replace("\\n", "\n")
+    for block in re.findall(r"PROBE-BEGIN\n(.*?)PROBE-END", text, re.DOTALL):
         values = {}
         for line in block.splitlines():
             if "=" in line:
