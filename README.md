@@ -17,7 +17,7 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | --- | --- |
 | Image | `ghcr.io/it3e/tnwks-agent-image:<X.Y.Z>`, and `:sha-<short>` for the same build. Only a release tag pushes. There is no `:latest`. tnwks-ops pins `:<X.Y.Z>@sha256:<digest>` |
 | User | uid 1000, gid 1000 (`node`). Set `fsGroup: 1000` |
-| Root file system | Read only. Give the pod an `emptyDir` at `/tmp` and at `/home/node/.config` |
+| Root file system | Read only. Give the pod an `emptyDir` at `/home/node/.config`, and a `/tmp` with mode 0700 and owner uid 1000: an `emptyDir` with a `subPath` that an init container made. The sandbox plugin refuses a temp dir under a dir that others can write with no sticky bit, and an `emptyDir` has mode 2777 |
 | Entrypoint, command | `tini -s --` and `node /app/openclaw.mjs gateway run` |
 | Config | `/home/node/.openclaw/openclaw.json`, a read-only file (a `subPath` mount of a ConfigMap) |
 | State directory | `/home/node/.openclaw`: the state volume, `subPath: state`. The workspace is `/home/node/.openclaw/workspace` |
@@ -25,7 +25,7 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | Port | 18789, on loopback. `/healthz` and `/readyz` answer on it |
 | Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox` and `/opt/openclaw/plugins/node_modules/@openclaw/signal`. The config names them in `plugins.load.paths` |
 | OpenShell client certificate | `ca.crt`, `tls.crt` and `tls.key` in `/home/node/.config/openshell/gateways/<endpoint>/mtls/`. `<endpoint>` is the `gatewayEndpoint` of the plugin config with each `:` and `/` as `_`: for `https://openshell.<ns>.svc.cluster.local:8080` it is `https___openshell.<ns>.svc.cluster.local_8080` |
-| Env, set by the pod | `XDG_CACHE_HOME=/home/node/.openclaw/.cache`. `TMPDIR` set to a directory of the user, because an `emptyDir` at `/tmp` has no sticky bit |
+| Env, set by the pod | `XDG_CACHE_HOME=/home/node/.openclaw/.cache` |
 | Env, secret | `OPENCLAW_GATEWAY_TOKEN` (the gateway), `LITELLM_API_KEY` (the model gateway, named in the config as `${LITELLM_API_KEY}`), `TELEGRAM_BOT_TOKEN` (the Telegram channel). Each other private value of the config is a `${NAME}` in the config and an env var from a Secret |
 
 The product runs `openclaw doctor --fix` in its own entrypoint script, and
@@ -40,8 +40,8 @@ OPENCLAW_CONFIG_PATH=/tmp/doctor/openclaw.json node /app/openclaw.mjs doctor --f
 ```
 
 Kubernetes makes the directory of a `subPath` as root when it is not there.
-Make `state` and `archives` on the volume as uid 1000 first (an init
-container), or the gateway can not write to them. The pod of the tool test
+Make `state` and `archives` on the volume, and the `/tmp` directory, as
+uid 1000 first (an init container), or the gateway can not write to them. The pod of the tool test
 does this ([`tests/kind/manifests.py`](tests/kind/manifests.py)).
 
 ## What is in it

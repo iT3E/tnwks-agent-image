@@ -121,8 +121,9 @@ class GatewayStarts(unittest.TestCase):
             "ALL",
             "--security-opt",
             "no-new-privileges",
+            # As in the pod: a /tmp of the user with mode 0700.
             "--tmpfs",
-            "/tmp",
+            "/tmp:uid=1000,gid=1000,mode=0700",
             "--tmpfs",
             "/home/node/.openclaw-archives:uid=1000,gid=1000,mode=0700",
             "--tmpfs",

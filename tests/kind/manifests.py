@@ -179,8 +179,6 @@ def support(pins):
 def agent(pins, image):
     env = [
         {"name": "XDG_CACHE_HOME", "value": "/home/node/.openclaw/.cache"},
-        # The temp dir of the user. An emptyDir at /tmp has no sticky bit.
-        {"name": "TMPDIR", "value": "/tmp/node"},
         # A value of the config that names an env var (`${OPENSHELL_SANDBOX_FROM}`).
         {"name": "OPENSHELL_SANDBOX_FROM", "value": pins["python"]},
     ]
@@ -198,23 +196,26 @@ def agent(pins, image):
             "subPath": "openclaw.json",
             "readOnly": True,
         },
-        {"name": "tmp", "mountPath": "/tmp"},
+        # /tmp is a directory of the user with mode 0700 in an emptyDir. The
+        # sandbox plugin refuses a temp dir under a dir that others can write
+        # with no sticky bit, and an emptyDir has mode 2777.
+        {"name": "tmp", "mountPath": "/tmp", "subPath": "tmp"},
         {"name": "user-config", "mountPath": "/home/node/.config"},
     ]
     # The first init container stands for what is on a state volume and
-    # what the ops repository adds: the directories of the volume with the
-    # owner of the image user, a credentials file and an archive (each with
-    # a marker that the probe looks for), the temp dir, and the client
+    # what the ops repository adds: the directories of the volume and the
+    # temp dir with the owner of the image user, a credentials file and an
+    # archive (each with a marker that the probe looks for), and the client
     # certificate of the OpenShell gateway in the directory of the CLI.
     prepare = "\n".join(
         [
             "set -eu",
-            "mkdir -p /volume/state/credentials /volume/archives /tmp/node",
-            "chmod 0700 /volume/state /volume/archives /tmp/node",
+            "mkdir -p /volume/state/credentials /volume/archives /scratch/tmp",
+            "chmod 0700 /volume/state /volume/archives /scratch/tmp",
             f"printf '{{\"marker\": \"%s\"}}\\n' '{FILE_MARKER}' > /volume/state/credentials/test-marker.json",
-            f"printf '%s\\n' '{FILE_MARKER}' > /tmp/node/marker.txt",
-            f"tar -czf /volume/archives/{ARCHIVE_NAME} -C /tmp/node marker.txt",
-            "rm /tmp/node/marker.txt",
+            f"printf '%s\\n' '{FILE_MARKER}' > /scratch/tmp/marker.txt",
+            f"tar -czf /volume/archives/{ARCHIVE_NAME} -C /scratch/tmp marker.txt",
+            "rm /scratch/tmp/marker.txt",
             f"mkdir -p {OPENSHELL_CERT_DIR}",
             f"cp /openshell-tls/ca.crt /openshell-tls/tls.crt /openshell-tls/tls.key {OPENSHELL_CERT_DIR}/",
             f"chmod 0600 {OPENSHELL_CERT_DIR}/*",
@@ -257,7 +258,7 @@ def agent(pins, image):
                     "securityContext": RESTRICTED,
                     "volumeMounts": [
                         {"name": "volume", "mountPath": "/volume"},
-                        {"name": "tmp", "mountPath": "/tmp"},
+                        {"name": "tmp", "mountPath": "/scratch"},
                         {"name": "user-config", "mountPath": "/home/node/.config"},
                         {
                             "name": "openshell-tls",

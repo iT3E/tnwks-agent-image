@@ -79,12 +79,15 @@ class ToolsRunInASandbox(unittest.TestCase):
         cls.last = (
             max(records, key=lambda r: len(r.get("tool_uses", []))) if records else {}
         )
-        # The result of each step of the plan, by its index.
+        # The result of each step of the plan, by its index. The product can
+        # change the ids of the calls, so the index is the place of the call.
+        index = {
+            use.get("id"): i for i, use in enumerate(cls.last.get("tool_uses", []))
+        }
         cls.results = {}
         for result in cls.last.get("tool_results", []):
-            m = re.match(r"toolu_mock(\d+)$", result.get("id") or "")
-            if m:
-                cls.results[int(m.group(1))] = result
+            if result.get("id") in index:
+                cls.results[index[result["id"]]] = result
         print(f"\nturn: exit {cls.turn.returncode}, answer {cls.last.get('answer')!r}")
         print(f"offered: {sorted(cls.last.get('tools_offered', []))}")
         for i, step in enumerate(cls.plan):
