@@ -183,15 +183,16 @@ PLANS["denied-tools"] = [
         "force": True,
         "input": {"node": "local", "path": "/home/node/.openclaw"},
     },
+    # The product takes at most 50 results for one search.
     {
         "tool": "tool_search",
         "input": {
             "queries": [
-                {"query": "code execution python analysis", "limit": 12},
-                {"query": "fetch a file from a node", "limit": 12},
-                {"query": "write a file on a node", "limit": 12},
-                {"query": "list a directory on a node", "limit": 12},
-                {"query": "fetch a directory archive", "limit": 12},
+                {"query": "code execution python analysis", "limit": 10},
+                {"query": "fetch a file from a node", "limit": 10},
+                {"query": "write a file on a node", "limit": 10},
+                {"query": "list a directory on a node", "limit": 10},
+                {"query": "fetch a directory archive", "limit": 10},
             ]
         },
     },
