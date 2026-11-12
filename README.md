@@ -70,7 +70,6 @@ repository.
 | OpenShell | `Dockerfile`, the `openshell-release` stage | Renovate, tag and digest. The CLI in the image, and the chart and images of the test cluster, follow it |
 | The images of the test cluster | [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. A change there makes no release |
 | kind, helm, kubectl | [`tests/kind/up.sh`](tests/kind/up.sh), a version and a sha256 each | By hand, from the checksum file of each release. Renovate does not read files under `tests/` |
-| Claude Code (the test layer of the Claude CLI test only) | [`.github/workflows/claude-cli.yaml`](.github/workflows/claude-cli.yaml), `CLAUDE_CODE_VERSION` | Renovate (npm). Not in the image that ships |
 
 ## The tests
 
@@ -96,7 +95,13 @@ failed test means no image.
    file of the agent pod. The same probe in the agent pod must find each of
    these things. A write to the path of the config from a sandbox must not
    change the config. A new tool in a product update fails the test until
-   a person adds it to the list of the test.
+   a person adds it to the list of the test. The product has tools that are
+   on by default and that the config denies by name in `tools.deny`:
+   `code_execution` (the bundled xai plugin) and the file transfer tools
+   `file_fetch`, `file_write`, `dir_list` and `dir_fetch` (the bundled
+   file-transfer plugin). A second turn asks for each one by name and
+   searches for them: the product must not offer one, a call must fail and
+   run nothing, and the tool search must not find one.
 3. **The trace test** ([`tests/test_traces.py`](tests/test_traces.py), CI
    only): a marker in the prompt, in a tool call and in the answer of the
    model must not get to the trace collector, and the spans of the turn
@@ -121,32 +126,6 @@ prints the pods, the events and the logs to the job log.
 Never run the kind part on a workstation that runs a live cluster.
 `bin/image-test` makes the cluster only when `CI=true` or
 `IMAGE_TEST_KIND=1`.
-
-### The Claude CLI test
-
-The workflow [`claude-cli.yaml`](.github/workflows/claude-cli.yaml) is a job
-of its own, so its result hides no result of the image job. It tests
-OpenClaw's Claude CLI runtime (`agentRuntime: { id: "claude-cli" }`) behind a
-model gateway, on the test cluster with the agent pod of
-`manifests.py claude-agent`. The image that ships holds no Claude Code: the
-job adds it in a test layer ([`tests/claude-cli/Dockerfile`](tests/claude-cli/Dockerfile)),
-at the version that the workflow pins for Renovate.
-[`tests/test_claude_cli.py`](tests/test_claude_cli.py) records where the
-model calls go (the mock, the network policy of the pod, the log of the
-cluster DNS), where each OpenClaw tool runs when it comes through the MCP
-bridge, and which Claude Code native tools the model can reach. It writes
-what it finds to the job summary. It fails only when the harness can not
-give the evidence: a finding is a result, not a failure.
-
-The same job runs a spike on the same cluster:
-[`tests/test_sandbox_exec.py`](tests/test_sandbox_exec.py). The test layer
-also holds a small plugin ([`tests/claude-cli/sandbox-exec`](tests/claude-cli/sandbox-exec))
-that registers the tool `sandbox_exec`. The tool runs one command in the
-OpenShell sandbox of the session, through the public plugin SDK. The test
-records whether a Claude CLI turn gets the tool, where the command runs,
-what happens to the workspace, which sandbox each call gets and who deletes
-it, and whether a per-agent tool policy removes the tool. The plugin is a
-spike: the image that ships does not hold it.
 
 ## Workflow
 

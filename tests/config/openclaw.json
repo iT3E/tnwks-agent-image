@@ -8,7 +8,10 @@
   },
   "update": {"checkOnStart": false},
   "cron": {"enabled": false},
-  "tools": {"elevated": {"enabled": false}},
+  "tools": {
+    "elevated": {"enabled": false},
+    "deny": ["code_execution", "file_fetch", "file_write", "dir_list", "dir_fetch"]
+  },
   "agents": {
     "defaults": {
       "workspace": "~/.openclaw/workspace",

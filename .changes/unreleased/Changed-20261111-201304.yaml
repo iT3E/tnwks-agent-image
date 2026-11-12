@@ -1,0 +1,3 @@
+kind: Changed
+body: The tool test checks that the tools that are on by default and that the config denies (code_execution, file_fetch, file_write, dir_list, dir_fetch) are not available to a turn
+time: 2026-11-11T20:13:04.078383048-08:00
