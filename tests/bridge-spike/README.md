@@ -23,8 +23,11 @@ PORT=8080 node bridge.mjs
 
 `PORT` is optional (default 8080). Nothing else is required. A client then
 uses `http://127.0.0.1:8080` as its Anthropic base URL, with any key: the
-bridge does not check it and never forwards it. `BRIDGE_IDLE_SECONDS`
-(default 900) closes a conversation that has been idle that long.
+bridge does not check it and never forwards it. Optional limits:
+`BRIDGE_IDLE_SECONDS` (default 900) closes a conversation idle that long,
+`BRIDGE_MAX_SESSIONS` (default 8) is the most live conversations (each one
+is a Claude Code process), and `BRIDGE_CALL_SECONDS` (default 300) fails a
+model call that does not end in that time.
 
 In CI, the SDK gets `ANTHROPIC_BASE_URL` (the mock model) and a fake
 `ANTHROPIC_API_KEY` from the pod environment.
@@ -43,10 +46,11 @@ In CI, the SDK gets `ANTHROPIC_BASE_URL` (the mock model) and a fake
 - **Tool calls.** The bridge runs no tool itself. When a model call ends with
   `stop_reason: "tool_use"`, the bridge ends the HTTP response with those
   blocks. The SDK session stays open, and the MCP handler of each call waits.
-  The client's next request brings `tool_result` blocks, and the bridge
-  resolves each handler by its tool_use id. With more than one call in an
-  answer, a result that comes before its handler call is kept until that
-  call.
+  The engine names the tool_use id of each MCP call in
+  `_meta["claudecode/toolUseId"]` (seen in CI, not documented), and it can
+  call a handler before the model call has ended. The client's next request
+  brings `tool_result` blocks, and the bridge resolves each handler by that
+  id. A result that comes before its handler call is kept until that call.
 - **Off.** Claude Code's built-in tools are off (`tools: []`), with
   `settingSources: []`, `skills: []`, no hooks, `strictMcpConfig`,
   `permissionMode: "dontAsk"` with only the `client` server allowed,
@@ -58,6 +62,10 @@ In CI, the SDK gets `ANTHROPIC_BASE_URL` (the mock model) and a fake
   SDK's `thinking` (disabled when the client does not ask). `temperature`,
   `top_p`, `top_k`, `stop_sequences`, `tool_choice` and `metadata` are not
   carried; the bridge logs them as dropped.
+- **New input.** The new input of a request is every user message after the
+  last assistant message. OpenClaw, for example, sends its runtime context as
+  a user message of its own. Tool results go to their handlers. Any other
+  block goes in as the next user message.
 - **Sessions.** There is one SDK session (one Claude Code process) for each
   conversation. The bridge matches a request to its session by the tool_use
   ids of the last assistant message. If those do not match, it uses a hash of

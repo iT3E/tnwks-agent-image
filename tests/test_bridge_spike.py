@@ -410,7 +410,7 @@ class BridgeSpike(unittest.TestCase):
                     }
                 ],
                 tools=[WEATHER],
-                thinking={"type": "enabled", "budget_tokens": 1024},
+                thinking={"type": "adaptive"},
                 messages=[
                     {
                         "role": "user",
@@ -582,6 +582,7 @@ class BridgeSpike(unittest.TestCase):
 
     @classmethod
     def litellm(cls):
+        kx("-n", SUPPORT_NS, "scale", "deploy/litellm", "--replicas=1")
         ready = kx(
             "-n",
             SUPPORT_NS,
@@ -700,7 +701,8 @@ class BridgeSpike(unittest.TestCase):
                         "stream",
                         "model",
                         "messages",
-                        "last_blocks",
+                        "shape",
+                        "new_input",
                         "dropped",
                         "cache_control_marks",
                         "user_agent",

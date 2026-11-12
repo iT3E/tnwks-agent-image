@@ -449,13 +449,16 @@ def bridge(pins, image):
                 "value": "http://mock-model.test-support.svc.cluster.local:8000/bridge-upstream",
             },
             {"name": "ANTHROPIC_API_KEY", "value": BRIDGE_ENV_KEY},
+            # Keep the number of Claude Code processes small on the runner.
+            {"name": "BRIDGE_IDLE_SECONDS", "value": "300"},
+            {"name": "BRIDGE_MAX_SESSIONS", "value": "6"},
         ],
         "ports": [{"containerPort": 8080}],
         "readinessProbe": {"tcpSocket": {"port": 8080}, "periodSeconds": 2},
         "volumeMounts": home,
         "resources": {
             "requests": {"cpu": "100m", "memory": "256Mi"},
-            "limits": {"memory": "6Gi"},
+            "limits": {"memory": "4Gi"},
         },
     }
     items = [
@@ -511,8 +514,11 @@ def bridge(pins, image):
             {"name": "tmp", "emptyDir": {}},
         ],
     )
-    # The image writes below its own directory at start, so its root is not
-    # read only. The rest of the restricted context stays.
+    # The test starts it (one replica) when it needs it, so that it takes no
+    # memory of the runner before. The image writes below its own directory
+    # at start, so its root is not read only. The rest of the restricted
+    # context stays.
+    proxy["spec"]["replicas"] = 0
     proxy["spec"]["template"]["spec"]["containers"][0]["securityContext"] = dict(
         RESTRICTED, readOnlyRootFilesystem=False
     )

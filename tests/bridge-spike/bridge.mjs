@@ -45,6 +45,9 @@ const PORT = Number(process.env.PORT || 8080);
 const IDLE_MS = Number(process.env.BRIDGE_IDLE_SECONDS || 900) * 1000;
 // A model call that does not end in this time fails the request (504).
 const CALL_MS = Number(process.env.BRIDGE_CALL_SECONDS || 300) * 1000;
+// At most this many live sessions (Claude Code processes); a new one closes
+// the idle session that was used least recently.
+const MAX_SESSIONS = Number(process.env.BRIDGE_MAX_SESSIONS || 8);
 const APP = "tnwks-messages-bridge/0.0.0-spike";
 const SERVER = "client";
 const PREFIX = `mcp__${SERVER}__`;
@@ -129,6 +132,19 @@ class Inbox {
   }
 }
 
+// The index of the last assistant message, or -1.
+function lastAssistant(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "assistant") return i;
+  return -1;
+}
+
+// The blocks of the user messages after the last assistant message: the new
+// input of a request. A client can send more than one (OpenClaw sends its
+// runtime context as a user message of its own).
+function newInput(messages) {
+  return messages.slice(lastAssistant(messages) + 1).flatMap(blocksOf);
+}
+
 function userMessage(content) {
   return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
@@ -167,7 +183,7 @@ class Sink {
   constructor(res, stream, session, mode) {
     this.res = res;
     this.timer = setTimeout(() => {
-      log("call_timeout", { session: session.id, mode, current: Boolean(session.current), pending_uses: session.uses.length });
+      log("call_timeout", { session: session.id, mode, current: Boolean(session.current), unanswered: session.unanswered() });
       this.fail(504, "bridge: the model call did not end in time");
       if (session.sink === this) session.sink = null;
     }, CALL_MS);
@@ -219,8 +235,10 @@ class Session {
     this.toolNames = new Set(this.tools.map((t) => t.name));
     this.inbox = new Inbox();
     this.sink = null;
-    this.uses = []; // tool_use blocks given to the client: {id, name, input, called, resolve}
-    this.results = new Map(); // tool_use id -> MCP result that came before its handler call
+    // Each tool call of the engine, by tool_use id: {name, resolve, result}.
+    // The engine sends the id in the MCP call (`_meta["claudecode/toolUseId"]`),
+    // and may call the handler before the model call has ended.
+    this.calls = new Map();
     this.current = null; // the message that the engine streams now
     this.touched = Date.now();
     this.closed = false;
@@ -334,7 +352,11 @@ class Session {
       const block = out.content_block;
       if (block.type === "tool_use" && block.name.startsWith(PREFIX)) block.name = block.name.slice(PREFIX.length);
       this.current.content[ev.index] = structuredClone(block);
-      if (block.type === "tool_use") this.jsonParts.set(ev.index, "");
+      if (block.type === "tool_use") {
+        this.jsonParts.set(ev.index, "");
+        this.call(block.id, block.name);
+        byToolUse.set(block.id, this);
+      }
     } else if (ev.type === "content_block_delta") {
       const block = this.current.content[ev.index];
       const d = ev.delta;
@@ -366,11 +388,6 @@ class Session {
     const message = this.current;
     this.current = null;
     const uses = message.content.filter((b) => b?.type === "tool_use");
-    for (const use of uses) {
-      if (!this.toolNames.has(use.name)) continue;
-      this.uses.push({ id: use.id, name: use.name, input: use.input, called: false, resolve: null });
-      byToolUse.set(use.id, this);
-    }
     byHistory.set(sha([...this.history, ...shape([{ role: "assistant", content: message.content }])]), this);
     log("model_call_end", {
       session: this.id,
@@ -384,77 +401,87 @@ class Session {
     this.sink = null;
   }
 
+  call(id, name) {
+    if (!this.calls.has(id)) this.calls.set(id, { name, resolve: null, result: null, handled: false });
+    return this.calls.get(id);
+  }
+
   // The engine calls a client tool: wait for the client's result.
   toolCall(name, args, meta) {
-    const use =
-      this.uses.find((u) => !u.called && u.name === name && JSON.stringify(u.input) === JSON.stringify(args)) ||
-      this.uses.find((u) => !u.called && u.name === name);
-    log("tool_call", { session: this.id, name, matched: use?.id || null, meta_keys: Object.keys(meta || {}) });
-    if (!use) return Promise.resolve({ content: [{ type: "text", text: "bridge: no matching tool_use" }], isError: true });
-    use.called = true;
-    if (this.results.has(use.id)) {
-      const result = this.results.get(use.id);
-      this.results.delete(use.id);
-      this.forget(use);
-      return Promise.resolve(result);
+    let id = meta?.["claudecode/toolUseId"];
+    if (!id) {
+      // No id in the call: the oldest call of that tool with no handler yet.
+      id = [...this.calls].find(([, c]) => c.name === name && !c.handled)?.[0];
+    }
+    log("tool_call", { session: this.id, name, id: id || null, meta_keys: Object.keys(meta || {}) });
+    if (!id) return Promise.resolve({ content: [{ type: "text", text: "bridge: no matching tool_use" }], isError: true });
+    const call = this.call(id, name);
+    call.handled = true;
+    if (call.result) {
+      this.calls.delete(id);
+      byToolUse.delete(id);
+      return Promise.resolve(call.result);
     }
     return new Promise((resolve) => {
-      use.resolve = (result) => {
-        this.forget(use);
-        resolve(result);
-      };
+      call.resolve = resolve;
     });
   }
 
-  forget(use) {
-    this.uses = this.uses.filter((u) => u !== use);
-    byToolUse.delete(use.id);
+  // A tool_result of the client: to its waiting handler, or kept for it.
+  deliver(block) {
+    const id = block.tool_use_id;
+    const call = this.calls.get(id);
+    const result = toMcpResult(block);
+    if (!call) return log("unknown_tool_result", { session: this.id, id });
+    if (call.resolve) {
+      this.calls.delete(id);
+      byToolUse.delete(id);
+      call.resolve(result);
+    } else call.result = result;
+  }
+
+  // Tool calls that wait for a client result.
+  unanswered() {
+    return [...this.calls.values()].filter((c) => !c.result).length;
   }
 
   // The client's next request on this session.
   continueWith(body, res, stream) {
     this.history = shape(body.messages);
-    const last = body.messages.at(-1);
-    const results = blocksOf(last).filter((b) => b.type === "tool_result");
-    const other = blocksOf(last).filter((b) => b.type !== "tool_result");
+    const input = newInput(body.messages);
+    const results = input.filter((b) => b.type === "tool_result");
+    const other = input.filter((b) => b.type !== "tool_result");
     this.sink = new Sink(res, stream, this, results.length ? "tool-result" : "continue");
     this.touched = Date.now();
     if (results.length) {
-      for (const block of results) {
-        const use = this.uses.find((u) => u.id === block.tool_use_id);
-        const result = toMcpResult(block);
-        if (!use) log("unknown_tool_result", { session: this.id, id: block.tool_use_id });
-        else if (use.resolve) use.resolve(result);
-        else this.results.set(use.id, result);
-      }
+      for (const block of results) this.deliver(block);
       // Text next to the results goes in as the next user message.
       if (other.length) {
         log("text_with_tool_results", { session: this.id, blocks: other.map((b) => b.type) });
         this.inbox.push(userMessage(other));
       }
     } else {
-      this.inbox.push(userMessage(blocksOf(last)));
+      this.inbox.push(userMessage(input));
     }
   }
 
   start(body, res, stream, rebuilt) {
     this.history = shape(body.messages);
     this.sink = new Sink(res, stream, this, rebuilt ? "rebuilt" : "new");
-    const last = body.messages.at(-1);
+    const input = newInput(body.messages);
     if (!rebuilt) {
-      this.inbox.push(userMessage(blocksOf(last)));
+      this.inbox.push(userMessage(input));
       return;
     }
-    const earlier = body.messages.slice(0, -1);
-    const lastBlocks = blocksOf(last);
-    const carried = lastBlocks.filter((b) => b.type === "text" || b.type === "image" || b.type === "document");
-    const results = lastBlocks.filter((b) => b.type === "tool_result");
+    const cut = lastAssistant(body.messages) + 1;
+    const results = input.filter((b) => b.type === "tool_result");
+    const carried = input.filter((b) => b.type === "text" || b.type === "image" || b.type === "document");
     const content = [
       {
         type: "text",
         text:
           "The conversation so far, as the client sent it (the bridge had no live session for it):\n" +
-          transcript(results.length ? body.messages : earlier),
+          transcript([...body.messages.slice(0, cut), ...(results.length ? [{ role: "user", content: results }] : [])]),
       },
       ...carried,
     ];
@@ -472,6 +499,8 @@ class Session {
       this.q.close?.();
     } catch {}
     rmSync(this.cwd, { recursive: true, force: true });
+    for (const call of this.calls.values())
+      call.resolve?.({ content: [{ type: "text", text: "bridge: the session closed" }], isError: true });
     this.sink?.fail(502, `bridge: the session closed (${reason})`);
     log("session_end", { session: this.id, reason });
   }
@@ -479,13 +508,13 @@ class Session {
 
 // The live session of a request, if any.
 function liveSession(body) {
-  const prev = body.messages.at(-2);
-  if (!prev || prev.role !== "assistant") return null;
-  const ids = blocksOf(prev).filter((b) => b.type === "tool_use").map((b) => b.id);
-  const session = (ids.length && byToolUse.get(ids[0])) || byHistory.get(sha(shape(body.messages.slice(0, -1))));
+  const at = lastAssistant(body.messages);
+  if (at < 0) return null;
+  const ids = blocksOf(body.messages[at]).filter((b) => b.type === "tool_use").map((b) => b.id);
+  const session = (ids.length && byToolUse.get(ids[0])) || byHistory.get(sha(shape(body.messages.slice(0, at + 1))));
   if (!session || session.closed) return null;
-  const answered = blocksOf(body.messages.at(-1)).some((b) => b.type === "tool_result");
-  if (session.uses.length && !answered) {
+  const answered = newInput(body.messages).some((b) => b.type === "tool_result");
+  if (session.unanswered() && !answered) {
     // The engine waits for tool results that the client did not send.
     session.close("the client did not answer the tool calls");
     return null;
@@ -525,8 +554,17 @@ async function handleMessages(req, res) {
   if (session) {
     session.continueWith(body, res, stream);
   } else {
+    if (sessions.size >= MAX_SESSIONS) {
+      const idle = [...sessions].filter((s) => !s.sink).sort((a, b) => a.touched - b.touched);
+      const victim = idle.find((s) => !s.unanswered()) || idle[0];
+      if (!victim) {
+        res.writeHead(529, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "bridge: too many live conversations" } }));
+      }
+      victim.close("evicted for a new conversation");
+    }
     session = new Session(body);
-    mode = body.messages.length > 1 ? "rebuilt" : "new";
+    mode = lastAssistant(body.messages) >= 0 ? "rebuilt" : "new";
     session.start(body, res, stream, mode === "rebuilt");
   }
   log("request", {
@@ -535,7 +573,8 @@ async function handleMessages(req, res) {
     stream,
     model: body.model,
     messages: body.messages.length,
-    last_blocks: blocksOf(body.messages.at(-1)).map((b) => b.type),
+    shape: body.messages.map((m) => `${m.role[0]}:${blocksOf(m).map((b) => b.type[0] + (b.type === "tool_result" ? "r" : "")).join("")}`).join(" "),
+    new_input: newInput(body.messages).map((b) => b.type),
     tools: (body.tools || []).map((t) => t.name),
     system_sha: sha(Array.isArray(body.system) ? body.system.filter((b) => b.type === "text").map((b) => b.text) : body.system || ""),
     dropped,
@@ -555,7 +594,7 @@ const server = http.createServer((req, res) => {
   const path = (req.url || "/").split("?")[0];
   if (req.method === "GET" && path === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ ok: true, sessions: sessions.size, app: APP }));
+    return res.end(JSON.stringify({ ok: true, sessions: sessions.size, waiting_tool_calls: [...sessions].reduce((n, s) => n + s.unanswered(), 0), app: APP }));
   }
   if (req.method === "POST" && path.endsWith("/v1/messages")) {
     handleMessages(req, res).catch((error) => {
