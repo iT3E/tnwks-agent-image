@@ -25,6 +25,7 @@ The findings are not assertions: the test fails only when the harness can
 not give the evidence.
 """
 
+import faulthandler
 import json
 import os
 import re
@@ -122,6 +123,63 @@ def processes():
     }
 
 
+class Follow:
+    """Print the log of a deployment to the job log as it comes, short."""
+
+    def __init__(self, deploy, label):
+        kubectl = os.environ.get("IMAGE_TEST_KUBECTL", "kubectl")
+        self.proc = subprocess.Popen(
+            [
+                kubectl,
+                "--kubeconfig",
+                os.environ["IMAGE_TEST_KUBECONFIG"],
+                "--context",
+                f"kind-{CLUSTER}",
+                "-n",
+                SUPPORT_NS,
+                "logs",
+                "-f",
+                "--tail=0",
+                f"deploy/{deploy}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self.label = label
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        for line in self.proc.stdout:
+            print(f"{self.label}| {self.summary(line)}", flush=True)
+
+    @staticmethod
+    def summary(line):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            return short(line, 300)
+        if "bridge" in r:  # a record of the mock
+            return short(
+                {
+                    k: r.get(k)
+                    for k in (
+                        "route",
+                        "plan",
+                        "turn",
+                        "answer",
+                        "gateway_key",
+                        "stream",
+                    )
+                },
+                300,
+            )
+        return short(r, 400)
+
+    def close(self):
+        self.proc.kill()
+
+
 class PortForward:
     """`kubectl port-forward` to a service of the test support namespace."""
 
@@ -180,6 +238,9 @@ class BridgeSpike(unittest.TestCase):
         import anthropic
 
         cls.anthropic = anthropic
+        # Where the test waits, every 5 minutes, in the job log.
+        faulthandler.dump_traceback_later(300, repeat=True)
+        cls.follow = [Follow("bridge", "bridge"), Follow("mock-model", "mock")]
         cls.findings = {}
         cls.errors = {}
         cls.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -202,21 +263,27 @@ class BridgeSpike(unittest.TestCase):
         finally:
             cls.bridge.close()
             cls.mock.close()
+        faulthandler.cancel_dump_traceback_later()
+        for f in cls.follow:
+            f.close()
         cls.collect()
         cls.report()
 
     @classmethod
     def leg(cls, name, fn):
+        started = time.time()
+        print(f"\n== leg {name}", flush=True)
         try:
             fn()
         except Exception as error:  # a leg that fails is a finding
             cls.errors[name] = f"{type(error).__name__}: {short(error, 600)}"
-            print(f"leg {name}: {cls.errors[name]}")
+            print(f"leg {name}: {cls.errors[name]}", flush=True)
+        print(f"== leg {name} done in {round(time.time() - started)} s", flush=True)
 
     @classmethod
     def client(cls, url, **kw):
         return cls.anthropic.Anthropic(
-            base_url=url, api_key="dummy-client-key", max_retries=0, timeout=300, **kw
+            base_url=url, api_key="dummy-client-key", max_retries=0, timeout=120, **kw
         )
 
     # -- 1 and 2: OpenClaw on its own runtime --------------------------------
@@ -225,7 +292,7 @@ class BridgeSpike(unittest.TestCase):
     def openclaw_turn(cls):
         mark = f"oc-{uuid.uuid4().hex[:8]}"
         started, result = agent_turn(
-            f"bridge-{mark}", f"TOOLPLAN=bridge-tools WRITEMARK={mark}"
+            f"bridge-{mark}", f"TOOLPLAN=bridge-tools WRITEMARK={mark}", timeout=420
         )
         time.sleep(2)
         recs = records_of(mark, started)
@@ -470,6 +537,7 @@ class BridgeSpike(unittest.TestCase):
         kx("-n", SUPPORT_NS, "rollout", "restart", "deploy/bridge")
         kx("-n", SUPPORT_NS, "rollout", "status", "deploy/bridge", "--timeout=300s")
         time.sleep(3)
+        cls.follow.append(Follow("bridge", "bridge-2"))
         cls.bridge.close()
         cls.bridge = PortForward("bridge", 8080)
         c = cls.client(cls.bridge.url)

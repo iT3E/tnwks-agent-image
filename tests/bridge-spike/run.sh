@@ -15,7 +15,7 @@ bridge="${2:?usage: tests/bridge-spike/run.sh <agent image ref> <bridge image re
 python="${BRIDGE_PYTHON:-python3}"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 export IMAGE_REF="$image" BRIDGE_IMAGE="$bridge"
-export PYTHONDONTWRITEBYTECODE=1
+export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 if [[ "${CI:-}" != "true" ]]; then
   echo "run.sh: the bridge spike runs in CI only" >&2

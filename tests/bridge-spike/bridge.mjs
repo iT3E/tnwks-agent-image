@@ -43,6 +43,8 @@ import {
 
 const PORT = Number(process.env.PORT || 8080);
 const IDLE_MS = Number(process.env.BRIDGE_IDLE_SECONDS || 900) * 1000;
+// A model call that does not end in this time fails the request (504).
+const CALL_MS = Number(process.env.BRIDGE_CALL_SECONDS || 300) * 1000;
 const APP = "tnwks-messages-bridge/0.0.0-spike";
 const SERVER = "client";
 const PREFIX = `mcp__${SERVER}__`;
@@ -164,6 +166,11 @@ function transcript(messages) {
 class Sink {
   constructor(res, stream, session, mode) {
     this.res = res;
+    this.timer = setTimeout(() => {
+      log("call_timeout", { session: session.id, mode, current: Boolean(session.current), pending_uses: session.uses.length });
+      this.fail(504, "bridge: the model call did not end in time");
+      if (session.sink === this) session.sink = null;
+    }, CALL_MS);
     this.stream = stream;
     this.message = null;
     this.json = new Map();
@@ -182,6 +189,7 @@ class Sink {
   finish(message) {
     if (this.done) return;
     this.done = true;
+    clearTimeout(this.timer);
     if (this.stream) this.res.end();
     else {
       this.res.writeHead(200, { "content-type": "application/json", ...this.headers });
@@ -191,6 +199,7 @@ class Sink {
   fail(status, text) {
     if (this.done) return;
     this.done = true;
+    clearTimeout(this.timer);
     const body = { type: "error", error: { type: "api_error", message: text } };
     if (this.stream && this.res.headersSent) {
       this.res.write(`event: error\ndata: ${JSON.stringify(body)}\n\n`);
@@ -282,6 +291,7 @@ class Session {
     try {
       for await (const msg of this.q) {
         this.touched = Date.now();
+        if (msg.type !== "stream_event") log("sdk_message", { session: this.id, type: msg.type, subtype: msg.subtype });
         if (msg.type === "stream_event") {
           if (!msg.parent_tool_use_id) this.onEvent(msg.event);
         } else if (msg.type === "system" && msg.subtype === "init") {
