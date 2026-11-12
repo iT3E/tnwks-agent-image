@@ -1,0 +1,50 @@
+---
+name: "Bridge spike"
+
+# Not managed by Copier: a spike of this repository only.
+#
+# A Messages API bridge that runs each conversation through the Claude Agent
+# SDK (tests/bridge-spike), on a kind cluster: OpenClaw on its own runtime
+# with its model provider at the bridge, a plain Messages API client, and
+# LiteLLM in front (tests/test_bridge_spike.py). The upstream of the SDK is
+# the mock model of the test cluster, with a fake key. The image that ships
+# does not change.
+on:
+  pull_request:
+    paths:
+      - "tests/**"
+      - ".github/workflows/bridge-spike.yaml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bridge-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge-spike:
+    name: bridge-spike
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t tnwks-agent-image:ci .
+
+      - name: Build the bridge (test only)
+        run: docker build --target bridge -t tnwks-bridge-spike:ci tests/bridge-spike
+
+      - name: Python client
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/bridge-spike/requirements.txt
+
+      - name: Run the bridge spike
+        run: BRIDGE_PYTHON="$RUNNER_TEMP/venv/bin/python" tests/bridge-spike/run.sh tnwks-agent-image:ci tnwks-bridge-spike:ci

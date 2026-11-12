@@ -32,6 +32,11 @@ FAKE_SECRETS = {
 # A dummy gateway key in the env of the pod (the Claude CLI test only). The
 # mock names each key that it sees by a label, never by its value.
 POD_ENV_KEY = "dummy-pod-env-key-4e1b77"
+# The fake key of the bridge spike (tests/bridge-spike): the upstream key in
+# the environment of the bridge.
+BRIDGE_ENV_KEY = "dummy-bridge-env-key-7c2d90"
+# Fake: the test LiteLLM needs a master key, which must start with sk-.
+LITELLM_MASTER_KEY = "sk-dummy-litellm-master-4b81"
 ARCHIVE_NAME = "openclaw-backup-test-archive.tar.gz"
 FILE_MARKER = "TNWKS-STATE-FILE-MARKER-5e0c72"
 
@@ -132,7 +137,8 @@ def mock_env():
         "MOCK_SECRET_VALUES": ",".join(FAKE_SECRETS.values()),
         "MOCK_ARCHIVE_NAME": ARCHIVE_NAME,
         "MOCK_FILE_MARKER": FILE_MARKER,
-        "MOCK_GATEWAY_KEYS": f"pod-env={POD_ENV_KEY},secret-env={FAKE_SECRETS['LITELLM_API_KEY']}",
+        "MOCK_GATEWAY_KEYS": f"pod-env={POD_ENV_KEY},secret-env={FAKE_SECRETS['LITELLM_API_KEY']},"
+        f"bridge-env={BRIDGE_ENV_KEY}",
     }
 
 
