@@ -9,7 +9,7 @@
 //
 // The mapping (README.md has the details):
 // - The client's `system` is the SDK's custom system prompt (`systemPrompt`
-//   as a string, or a string[] for system blocks).
+//   as one string; text blocks are joined with a blank line).
 // - The client's `tools` are offered through one in-process MCP server
 //   ("client"), with the client's JSON Schema as written. The engine names
 //   them `mcp__client__<name>`; the bridge gives the client its own names
@@ -42,6 +42,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 const PORT = Number(process.env.PORT || 8080);
+// No auth: listen on loopback unless told otherwise (the CI pod sets 0.0.0.0).
+const HOST = process.env.HOST || "127.0.0.1";
 const IDLE_MS = Number(process.env.BRIDGE_IDLE_SECONDS || 900) * 1000;
 // A model call that does not end in this time fails the request (504).
 const CALL_MS = Number(process.env.BRIDGE_CALL_SECONDS || 300) * 1000;
@@ -153,8 +155,25 @@ function newInput(messages) {
   return messages.slice(lastAssistant(messages) + 1).flatMap(blocksOf);
 }
 
+// The engine places its own cache marks, and the API takes at most 4, so the
+// client's marks on content blocks are not carried.
+function withoutCacheMarks(content) {
+  if (!Array.isArray(content)) return content;
+  return content.map((b) => {
+    if (!b || typeof b !== "object" || !("cache_control" in b)) return b;
+    const { cache_control, ...rest } = b;
+    return rest;
+  });
+}
+
 function userMessage(content) {
-  return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  return { type: "user", message: { role: "user", content: withoutCacheMarks(content) }, parent_tool_use_id: null };
+}
+
+// The client's system as one string: text blocks joined with a blank line.
+function systemText(system) {
+  if (!Array.isArray(system)) return system || "";
+  return system.filter((b) => b.type === "text").map((b) => b.text).join("\n\n");
 }
 
 // A tool_result block of the client, as an MCP tool result.
@@ -242,10 +261,6 @@ class Session {
     this.tools = body.tools || [];
     this.toolNames = new Set(this.tools.map((t) => t.name));
     this.inbox = new Inbox();
-    // User messages given to the engine, and turns it ended. A result belongs
-    // to the oldest open turn, so it can arrive after the next request.
-    this.pushed = 0;
-    this.ended = 0;
     this.sink = null;
     // Each tool call of the engine, by tool_use id: {name, resolve, result}.
     // The engine sends the id in the MCP call (`_meta["claudecode/toolUseId"]`),
@@ -271,9 +286,7 @@ class Session {
       this.toolCall(request.params.name, request.params.arguments || {}, request.params._meta),
     );
 
-    const system = Array.isArray(body.system)
-      ? body.system.filter((b) => b.type === "text").map((b) => b.text)
-      : body.system || "";
+    const system = systemText(body.system);
     const thinking =
       body.thinking?.type === "enabled"
         ? { type: "enabled", budgetTokens: body.thinking.budget_tokens }
@@ -339,9 +352,15 @@ class Session {
           });
         } else if (msg.type === "result") {
           log("sdk_result", { session: this.id, subtype: msg.subtype, is_error: msg.is_error, num_turns: msg.num_turns, error: msg.is_error ? String(msg.result || msg.errors || "").slice(0, 500) : undefined });
-          this.ended += 1;
-          if (this.sink && !this.current && this.ended >= this.pushed && msg.is_error)
-            this.sink.fail(502, `the engine ended the turn without a model call (${msg.subtype})`);
+          // A success result can arrive after the next request: it ends the
+          // previous turn, so it does not touch the open response.
+          if (msg.is_error) {
+            // A failed turn closes the session, so it does not hold a place.
+            const why = String(msg.result || msg.errors || msg.subtype).slice(0, 300);
+            this.sink?.fail(502, `the engine ended the turn with an error: ${why}`);
+            this.close(`the turn ended with an error (${msg.subtype})`);
+            break;
+          }
         } else if (msg.type === "assistant" && msg.error) {
           log("sdk_assistant_error", { session: this.id, error: msg.error });
         }
@@ -422,7 +441,6 @@ class Session {
   }
 
   push(message) {
-    this.pushed += 1;
     this.inbox.push(message);
   }
 
@@ -600,7 +618,7 @@ async function handleMessages(req, res) {
     })(),
     new_input: newInput(body.messages).map((b) => b.type),
     tools: (body.tools || []).map((t) => t.name),
-    system_sha: sha(Array.isArray(body.system) ? body.system.filter((b) => b.type === "text").map((b) => b.text) : body.system || ""),
+    system_sha: sha(systemText(body.system)),
     dropped,
     cache_control_marks: cacheControl,
     user_agent: (req.headers["user-agent"] || "").split(" ")[0],
@@ -646,4 +664,4 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   });
 }
 
-server.listen(PORT, () => log("listening", { port: PORT, app: APP }));
+server.listen(PORT, HOST, () => log("listening", { host: HOST, port: PORT, app: APP }));

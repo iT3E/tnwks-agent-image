@@ -443,6 +443,7 @@ def bridge(pins, image):
         "imagePullPolicy": "Never",
         "env": [
             {"name": "PORT", "value": "8080"},
+            {"name": "HOST", "value": "0.0.0.0"},
             {"name": "HOME", "value": "/home/bridge"},
             # The upstream of the Agent SDK: the mock, with a fake key.
             {

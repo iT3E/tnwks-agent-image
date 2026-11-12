@@ -256,6 +256,7 @@ class BridgeSpike(unittest.TestCase):
         try:
             cls.leg("client", cls.client_round_trip)
             cls.leg("stream", cls.client_stream)
+            cls.leg("cache", cls.cache_marks)
             cls.leg("latency", cls.latency)
             cls.leg("live", cls.live_sessions)
             cls.log_before_restart = bridge_log()
@@ -456,6 +457,90 @@ class BridgeSpike(unittest.TestCase):
                 "content": dump(final.content),
             }
         cls.stream_leg = out
+
+    @classmethod
+    def cache_marks(cls):
+        """A client with 4 cache marks of its own, the most the API takes.
+
+        The engine adds its own marks, and the mock refuses more than 4, as
+        the real API does. The bridge must not carry the client's marks.
+        """
+        mark = f"cc-{uuid.uuid4().hex[:8]}"
+        c = cls.client(cls.bridge.url)
+        eph = {"type": "ephemeral"}
+        system = [
+            {"type": "text", "text": f"Cache test. {SYSTEM_MARK}", "cache_control": eph}
+        ]
+        tools = [dict(WEATHER, cache_control=eph)]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"TOOLPLAN=bridge-one WRITEMARK={mark}",
+                        "cache_control": eph,
+                    },
+                    {"type": "text", "text": "Second block.", "cache_control": eph},
+                ],
+            }
+        ]
+        first = c.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=512,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+        # The next request moves one mark to the tool result: still 4.
+        messages[0]["content"][1].pop("cache_control")
+        messages.append({"role": "assistant", "content": dump(first.content)})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": b.id,
+                        "content": "WEATHER ok",
+                        "cache_control": eph,
+                    }
+                    for b in first.content
+                    if b.type == "tool_use"
+                ],
+            }
+        )
+        second = c.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=512,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+        time.sleep(2)
+        recs = [
+            r
+            for r in mock_records(cls.started)
+            if (r.get("marks") or {}).get("write") == mark
+        ]
+        cls.cache_leg = {
+            "client_marks": [4, 4],
+            "first": {"stop_reason": first.stop_reason, "content": dump(first.content)},
+            "second": {
+                "stop_reason": second.stop_reason,
+                "content": dump(second.content),
+            },
+            "refused_at_upstream": [
+                r.get("cache_marks") for r in recs if r.get("refused")
+            ],
+            "upstream_marks": [
+                (r.get("bridge") or {}).get("cache_control_marks")
+                for r in recs
+                if not r.get("refused")
+            ],
+        }
+        if cls.cache_leg["refused_at_upstream"]:
+            raise AssertionError(f"the upstream refused: {cls.cache_leg}")
 
     # -- 5: latency, live sessions, a restart ---------------------------------
 
@@ -797,6 +882,7 @@ class BridgeSpike(unittest.TestCase):
                     ],
                     "messages": b.get("messages"),
                 }
+        f["q4_cache_marks"] = getattr(cls, "cache_leg", None)
         f["q5_latency"] = getattr(cls, "latency_leg", None)
         f["q5_live"] = getattr(cls, "live_leg", None)
         f["q5_restart"] = getattr(cls, "restart_leg", None)
@@ -830,7 +916,7 @@ class BridgeSpike(unittest.TestCase):
         )
 
     def test_the_client_legs_ran(self):
-        for leg in ("client", "stream", "latency", "live", "restart"):
+        for leg in ("client", "stream", "cache", "latency", "live", "restart"):
             with self.subTest(leg=leg):
                 self.assertNotIn(leg, self.errors)
 

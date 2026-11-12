@@ -21,7 +21,9 @@ npm ci --omit=dev
 PORT=8080 node bridge.mjs
 ```
 
-`PORT` is optional (default 8080). Nothing else is required. A client then
+`PORT` is optional (default 8080). `HOST` is the address to listen on
+(default `127.0.0.1`). The bridge has no auth, so keep it on loopback; the
+CI pod sets `HOST=0.0.0.0`. Nothing else is required. A client then
 uses `http://127.0.0.1:8080` as its Anthropic base URL, with any key: the
 bridge does not check it and never forwards it. Optional limits:
 `BRIDGE_IDLE_SECONDS` (default 900) closes a conversation idle that long,
@@ -34,10 +36,15 @@ In CI, the SDK gets `ANTHROPIC_BASE_URL` (the mock model) and a fake
 
 ## The mapping
 
-- **System prompt.** The client's `system` becomes the SDK's `systemPrompt`:
-  a string stays a string, and text blocks become a `string[]` (their
-  `cache_control` is not carried). This is the SDK's custom prompt, not the
+- **System prompt.** The client's `system` becomes the SDK's `systemPrompt`
+  as one string: a string stays a string, and text blocks are joined with a
+  blank line (their `cache_control` is not carried). This is the SDK's custom prompt, not the
   `claude_code` preset. The CI job records what the engine sends around it.
+- **Cache marks.** The bridge removes `cache_control` from each content block
+  of the client's messages before they go to the engine. The engine places
+  its own marks (3 in CI), and the API takes at most 4 blocks with
+  `cache_control`, so client marks on top of the engine's would make the
+  API refuse the request.
 - **Tools.** The client's `tools` are offered through one in-process MCP
   server named `client`. Its `tools/list` returns the client's JSON Schema
   as written, with `_meta["anthropic/alwaysLoad"]`, so that the engine does

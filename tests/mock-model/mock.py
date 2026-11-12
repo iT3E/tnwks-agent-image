@@ -573,6 +573,20 @@ def bridge_facts(handler, body):
     }
 
 
+# The real API takes at most this many blocks with cache_control.
+MAX_CACHE_MARKS = 4
+
+
+def cache_marks(node):
+    """The blocks with cache_control in a request body, at any depth."""
+    if isinstance(node, dict):
+        own = 1 if node.get("cache_control") is not None else 0
+        return own + sum(cache_marks(v) for v in node.values())
+    if isinstance(node, list):
+        return sum(cache_marks(v) for v in node)
+    return 0
+
+
 def bridge_tool(name, offered):
     """The offered tool for a tool name of a bridge plan."""
     if name in offered:
@@ -651,6 +665,34 @@ class Handler(BaseHTTPRequestHandler):
                     "error": {
                         "type": "not_found_error",
                         "message": "mock: unknown path",
+                    },
+                },
+            )
+        found = cache_marks(body)
+        if found > MAX_CACHE_MARKS:
+            print(
+                json.dumps(
+                    dict(
+                        self.request_facts(),
+                        refused="cache_control",
+                        cache_marks=found,
+                        marks={
+                            "write": find(
+                                r"WRITEMARK=([A-Za-z0-9-]+)", user_texts(body)
+                            )
+                        },
+                    )
+                ),
+                flush=True,
+            )
+            return self._json(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "A maximum of 4 blocks with cache_control may be provided. "
+                        f"Found {found}.",
                     },
                 },
             )
