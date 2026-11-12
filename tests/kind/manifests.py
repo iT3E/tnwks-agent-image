@@ -32,6 +32,7 @@ from support import (  # noqa: E402
     AGENT_NS,
     ARCHIVE_NAME,
     BRIDGE_ENV_KEY,
+    LITELLM_MASTER_KEY,
     FAKE_SECRETS,
     FILE_MARKER,
     OPENSHELL_NS,
@@ -471,7 +472,7 @@ def bridge(pins, image):
         service("bridge", SUPPORT_NS, [("http", 8080)]),
     ]
     # LiteLLM: one Anthropic entry whose API base is the bridge, no database,
-    # no master key (the test cluster only). The config is JSON, which is
+    # and a fake master key (v1.109.0 refuses to start without one). The config is JSON, which is
     # YAML too.
     litellm_config = {
         "model_list": [
@@ -493,6 +494,7 @@ def bridge(pins, image):
         "env": [
             {"name": "HOME", "value": "/tmp"},
             {"name": "LITELLM_TELEMETRY", "value": "False"},
+            {"name": "LITELLM_MASTER_KEY", "value": LITELLM_MASTER_KEY},
         ],
         "ports": [{"containerPort": 4000}],
         "readinessProbe": {"tcpSocket": {"port": 4000}, "periodSeconds": 5},

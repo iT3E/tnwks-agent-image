@@ -76,6 +76,14 @@ function sha(value) {
   return createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
+// A tool_use id as a key. A client can rewrite ids: OpenClaw keeps only
+// [A-Za-z0-9] of an id for a provider that is not the Anthropic API itself.
+function idKey(id) {
+  return String(id || "").replace(/[^A-Za-z0-9]/g, "");
+}
+
+const CODES = { text: "t", tool_use: "u", tool_result: "r", image: "i", thinking: "k", redacted_thinking: "k", document: "d" };
+
 function blocksOf(message) {
   if (!message) return [];
   return typeof message.content === "string"
@@ -95,9 +103,9 @@ function shape(messages) {
           b.type === "text"
             ? ["t", (b.text || "").trim()]
             : b.type === "tool_use"
-              ? ["u", b.id]
+              ? ["u", idKey(b.id)]
               : b.type === "tool_result"
-                ? ["r", b.tool_use_id]
+                ? ["r", idKey(b.tool_use_id)]
                 : null,
         )
         .filter(Boolean),
@@ -234,6 +242,10 @@ class Session {
     this.tools = body.tools || [];
     this.toolNames = new Set(this.tools.map((t) => t.name));
     this.inbox = new Inbox();
+    // User messages given to the engine, and turns it ended. A result belongs
+    // to the oldest open turn, so it can arrive after the next request.
+    this.pushed = 0;
+    this.ended = 0;
     this.sink = null;
     // Each tool call of the engine, by tool_use id: {name, resolve, result}.
     // The engine sends the id in the MCP call (`_meta["claudecode/toolUseId"]`),
@@ -327,7 +339,9 @@ class Session {
           });
         } else if (msg.type === "result") {
           log("sdk_result", { session: this.id, subtype: msg.subtype, is_error: msg.is_error, num_turns: msg.num_turns, error: msg.is_error ? String(msg.result || msg.errors || "").slice(0, 500) : undefined });
-          if (this.sink && !this.current) this.sink.fail(502, `the engine ended the turn without a model call (${msg.subtype})`);
+          this.ended += 1;
+          if (this.sink && !this.current && this.ended >= this.pushed && msg.is_error)
+            this.sink.fail(502, `the engine ended the turn without a model call (${msg.subtype})`);
         } else if (msg.type === "assistant" && msg.error) {
           log("sdk_assistant_error", { session: this.id, error: msg.error });
         }
@@ -355,7 +369,7 @@ class Session {
       if (block.type === "tool_use") {
         this.jsonParts.set(ev.index, "");
         this.call(block.id, block.name);
-        byToolUse.set(block.id, this);
+        byToolUse.set(idKey(block.id), this);
       }
     } else if (ev.type === "content_block_delta") {
       const block = this.current.content[ev.index];
@@ -402,8 +416,14 @@ class Session {
   }
 
   call(id, name) {
-    if (!this.calls.has(id)) this.calls.set(id, { name, resolve: null, result: null, handled: false });
-    return this.calls.get(id);
+    const key = idKey(id);
+    if (!this.calls.has(key)) this.calls.set(key, { name, resolve: null, result: null, handled: false });
+    return this.calls.get(key);
+  }
+
+  push(message) {
+    this.pushed += 1;
+    this.inbox.push(message);
   }
 
   // The engine calls a client tool: wait for the client's result.
@@ -418,8 +438,8 @@ class Session {
     const call = this.call(id, name);
     call.handled = true;
     if (call.result) {
-      this.calls.delete(id);
-      byToolUse.delete(id);
+      this.calls.delete(idKey(id));
+      byToolUse.delete(idKey(id));
       return Promise.resolve(call.result);
     }
     return new Promise((resolve) => {
@@ -429,10 +449,10 @@ class Session {
 
   // A tool_result of the client: to its waiting handler, or kept for it.
   deliver(block) {
-    const id = block.tool_use_id;
+    const id = idKey(block.tool_use_id);
     const call = this.calls.get(id);
     const result = toMcpResult(block);
-    if (!call) return log("unknown_tool_result", { session: this.id, id });
+    if (!call) return log("unknown_tool_result", { session: this.id, id: block.tool_use_id });
     if (call.resolve) {
       this.calls.delete(id);
       byToolUse.delete(id);
@@ -458,10 +478,10 @@ class Session {
       // Text next to the results goes in as the next user message.
       if (other.length) {
         log("text_with_tool_results", { session: this.id, blocks: other.map((b) => b.type) });
-        this.inbox.push(userMessage(other));
+        this.push(userMessage(other));
       }
     } else {
-      this.inbox.push(userMessage(input));
+      this.push(userMessage(input));
     }
   }
 
@@ -470,7 +490,7 @@ class Session {
     this.sink = new Sink(res, stream, this, rebuilt ? "rebuilt" : "new");
     const input = newInput(body.messages);
     if (!rebuilt) {
-      this.inbox.push(userMessage(input));
+      this.push(userMessage(input));
       return;
     }
     const cut = lastAssistant(body.messages) + 1;
@@ -485,7 +505,7 @@ class Session {
       },
       ...carried,
     ];
-    this.inbox.push(userMessage(content));
+    this.push(userMessage(content));
   }
 
   close(reason) {
@@ -511,7 +531,7 @@ function liveSession(body) {
   const at = lastAssistant(body.messages);
   if (at < 0) return null;
   const ids = blocksOf(body.messages[at]).filter((b) => b.type === "tool_use").map((b) => b.id);
-  const session = (ids.length && byToolUse.get(ids[0])) || byHistory.get(sha(shape(body.messages.slice(0, at + 1))));
+  const session = (ids.length && byToolUse.get(idKey(ids[0]))) || byHistory.get(sha(shape(body.messages.slice(0, at + 1))));
   if (!session || session.closed) return null;
   const answered = newInput(body.messages).some((b) => b.type === "tool_result");
   if (session.unanswered() && !answered) {
@@ -573,7 +593,11 @@ async function handleMessages(req, res) {
     stream,
     model: body.model,
     messages: body.messages.length,
-    shape: body.messages.map((m) => `${m.role[0]}:${blocksOf(m).map((b) => b.type[0] + (b.type === "tool_result" ? "r" : "")).join("")}`).join(" "),
+    shape: body.messages.map((m) => `${m.role[0]}:${blocksOf(m).map((b) => CODES[b.type] || "?").join("")}`).join(" "),
+    tool_ids: (() => {
+      const at = lastAssistant(body.messages);
+      return at < 0 ? [] : blocksOf(body.messages[at]).filter((b) => b.type === "tool_use").map((b) => b.id);
+    })(),
     new_input: newInput(body.messages).map((b) => b.type),
     tools: (body.tools || []).map((t) => t.name),
     system_sha: sha(Array.isArray(body.system) ? body.system.filter((b) => b.type === "text").map((b) => b.text) : body.system || ""),

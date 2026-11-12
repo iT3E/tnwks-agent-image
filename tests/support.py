@@ -35,6 +35,8 @@ POD_ENV_KEY = "dummy-pod-env-key-4e1b77"
 # The fake key of the bridge spike (tests/bridge-spike): the upstream key in
 # the environment of the bridge.
 BRIDGE_ENV_KEY = "dummy-bridge-env-key-7c2d90"
+# Fake: the test LiteLLM needs a master key, which must start with sk-.
+LITELLM_MASTER_KEY = "sk-dummy-litellm-master-4b81"
 ARCHIVE_NAME = "openclaw-backup-test-archive.tar.gz"
 FILE_MARKER = "TNWKS-STATE-FILE-MARKER-5e0c72"
 

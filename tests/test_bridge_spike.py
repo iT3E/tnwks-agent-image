@@ -39,6 +39,7 @@ import uuid
 from support import (
     AGENT_NS,
     CLUSTER,
+    LITELLM_MASTER_KEY,
     SUPPORT_NS,
     agent_turn,
     kx,
@@ -281,9 +282,9 @@ class BridgeSpike(unittest.TestCase):
         print(f"== leg {name} done in {round(time.time() - started)} s", flush=True)
 
     @classmethod
-    def client(cls, url, **kw):
+    def client(cls, url, api_key="dummy-client-key", **kw):
         return cls.anthropic.Anthropic(
-            base_url=url, api_key="dummy-client-key", max_retries=0, timeout=120, **kw
+            base_url=url, api_key=api_key, max_retries=0, timeout=120, **kw
         )
 
     # -- 1 and 2: OpenClaw on its own runtime --------------------------------
@@ -589,7 +590,7 @@ class BridgeSpike(unittest.TestCase):
             "rollout",
             "status",
             "deploy/litellm",
-            "--timeout=420s",
+            "--timeout=240s",
             check=False,
         )
         if ready.returncode != 0:
@@ -605,7 +606,7 @@ class BridgeSpike(unittest.TestCase):
         proxy = PortForward("litellm", 4000)
         try:
             mark = f"ll-{uuid.uuid4().hex[:8]}"
-            c = cls.client(proxy.url)
+            c = cls.client(proxy.url, api_key=LITELLM_MASTER_KEY)
             messages = [
                 {"role": "user", "content": f"TOOLPLAN=bridge-client WRITEMARK={mark}"}
             ]
