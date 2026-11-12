@@ -1,3 +1,0 @@
-kind: Removed
-body: 'The Claude CLI runtime test and its test layer, the sandbox_exec plugin spike and the bridge spike: the image holds no Claude Code and no plugin for a shell tool, and the model bridge has its own repository'
-time: 2026-11-11T20:13:03.001637967-08:00
