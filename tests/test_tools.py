@@ -1,5 +1,6 @@
 """The tool test: each tool that runs code runs in a sandbox, and a sandbox
-holds no credential and no archive.
+holds no credential and no archive. The tools that are on by default and that
+the config denies are not available to a turn.
 
 It runs on the test cluster of CI (tests/kind/up.sh). One turn of the agent
 runs the plan `code-tools` of the mock model: each tool that runs code, the
@@ -7,8 +8,12 @@ file tools, a call through the tool search, and a write to the path of the
 config. Each code tool runs a probe. The test reads the tool results that the
 mock received, and runs the same probe in the agent pod as a control: the
 probe must find there what it must not find in a sandbox.
+
+A second turn runs the plan `denied-tools`: it asks for each denied tool by
+name, offered or not, and then searches for them.
 """
 
+import json
 import os
 import re
 import unittest
@@ -16,6 +21,7 @@ import uuid
 
 from support import (
     AGENT_NS,
+    REPO,
     FAKE_SECRETS,
     FILE_MARKER,
     agent_turn,
@@ -243,6 +249,91 @@ class ToolsRunInASandbox(unittest.TestCase):
             self.assertGreater(int(probe[key]), 0, key)
         for name in FAKE_SECRETS:
             self.assertIn(name, probe["env_names"].split(","))
+
+
+# The tools of the product that are on by default (bundled plugins with
+# `enabledByDefault`) and that the config of each agent denies by name:
+# `code_execution` (plugin xai) and the file transfer tools (plugin
+# file-transfer).
+DENIED_TOOLS = {"code_execution", "file_fetch", "file_write", "dir_list", "dir_fetch"}
+
+
+class TheConfigDeniesTheDefaultTools(unittest.TestCase):
+    def test_the_deny_list(self):
+        config = json.loads((REPO / "tests" / "config" / "openclaw.json").read_text())
+        deny = set(config.get("tools", {}).get("deny", []))
+        self.assertEqual(DENIED_TOOLS - deny, set(), "not in tools.deny")
+        self.assertEqual(set(load_mock().DENIED_TOOLS), DENIED_TOOLS)
+        self.assertTrue(DENIED_TOOLS <= HOST_TOOLS)
+
+
+@unittest.skipUnless(
+    os.environ.get("IMAGE_TEST_KUBECONFIG"), "no test cluster (tests/kind/up.sh)"
+)
+class DeniedToolsAreNotAvailable(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = load_mock().PLANS["denied-tools"]
+        cls.mark = uuid.uuid4().hex[:12]
+        started, cls.turn = agent_turn(
+            f"denied-test-{cls.mark}", f"TOOLPLAN=denied-tools WRITEMARK={cls.mark}"
+        )
+        records = [r for r in mock_records(started) if r.get("plan") == "denied-tools"]
+        cls.records = records
+        cls.last = (
+            max(records, key=lambda r: len(r.get("tool_uses", []))) if records else {}
+        )
+        index = {
+            use.get("id"): i for i, use in enumerate(cls.last.get("tool_uses", []))
+        }
+        cls.results = {}
+        for result in cls.last.get("tool_results", []):
+            if result.get("id") in index:
+                cls.results[index[result["id"]]] = result
+        print(
+            f"\ndenied turn: exit {cls.turn.returncode}, answer {cls.last.get('answer')!r}"
+        )
+        for i, step in enumerate(cls.plan):
+            result = cls.results.get(i, {})
+            text = (result.get("text") or "").replace("\n", " | ")
+            print(
+                f"step {i:2d} {step['tool']:<16} error={result.get('error')} {text[:300]}"
+            )
+
+    def test_the_turn_ran_each_step(self):
+        self.assertEqual(self.turn.returncode, 0, self.turn.stderr[-3000:])
+        self.assertEqual(len(self.last.get("tool_uses", [])), len(self.plan))
+        self.assertEqual(self.last.get("answer"), "MOCK-FINAL")
+
+    def test_not_offered(self):
+        for record in self.records:
+            offered = set(record.get("tools_offered", []))
+            self.assertEqual(offered & DENIED_TOOLS, set())
+
+    def test_a_call_by_name_fails(self):
+        # The product answers a call to a tool that is not in the turn with
+        # an error, and runs nothing.
+        for i, step in enumerate(self.plan):
+            if step["tool"] not in DENIED_TOOLS:
+                continue
+            with self.subTest(tool=step["tool"]):
+                self.assertIn(i, self.results, f"no result for {step['tool']}")
+                result = self.results[i]
+                self.assertTrue(result["error"], result["text"])
+                self.assertRegex(result["text"], r"(?i)not found|not available|denied")
+                self.assertNotIn("PROBE-BEGIN", result["text"])
+                self.assertNotIn(FILE_MARKER, result["text"])
+                for value in FAKE_SECRETS.values():
+                    self.assertNotIn(value, result["text"])
+
+    def test_the_tool_search_finds_none(self):
+        i = next(i for i, s in enumerate(self.plan) if s["tool"] == "tool_search")
+        self.assertIn(i, self.results, "no result for the tool search")
+        text = self.results[i]["text"]
+        found = set(re.findall(r'"name":\s*"([^"]+)"', text))
+        print(f"tool search found: {sorted(found)}")
+        self.assertFalse(self.results[i]["error"], text)
+        self.assertEqual(found & DENIED_TOOLS, set())
 
 
 if __name__ == "__main__":

@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 """Print the manifests of the test cluster, as one JSON list for kubectl.
 
-Usage: manifests.py support|agent|claude-agent|bridge|bridge-agent <image ref>
+Usage: manifests.py support|agent <image ref>
 
 - support: the namespaces, the mock model server and the trace collector.
 - agent: the agent pod, as tnwks-ops runs it: a restricted pod, a read-only
   root, the config as a read-only file from a ConfigMap, the secrets as env
   vars from a Secret, the state and the archives on one volume, and the
   client certificate of the OpenShell gateway.
-- claude-agent: the same pod with the config of the Claude CLI test
-  (tests/claude-cli), the managed settings of Claude Code, a dummy gateway key
-  in the pod env, and a network policy that lets the pod reach DNS, the test
-  support namespace and OpenShell only. The image is the test image with
-  Claude Code (tests/claude-cli/Dockerfile).
-- bridge: the bridge spike (tests/bridge-spike) in the test support
-  namespace, with the image ref of the bridge, and LiteLLM in front of it.
-- bridge-agent: the agent pod with the config of the bridge spike
-  (tests/config/bridge.json): its model provider is the bridge.
 
 The image references come from the Dockerfiles (tests/support.py), so that
 Renovate moves them. The values of the test are fake.
@@ -31,15 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from support import (  # noqa: E402
     AGENT_NS,
     ARCHIVE_NAME,
-    BRIDGE_ENV_KEY,
-    LITELLM_MASTER_KEY,
     FAKE_SECRETS,
     FILE_MARKER,
     OPENSHELL_NS,
-    POD_ENV_KEY,
     REPO,
     SUPPORT_NS,
-    from_lines,
     image_pins,
     mock_env,
 )
@@ -359,208 +346,11 @@ def agent(pins, image):
     ]
 
 
-def claude_agent(pins, image):
-    """The agent pod of the Claude CLI test (tests/test_claude_cli.py)."""
-    items = agent(pins, image)
-    secret, config, pod = items
-    config["data"]["openclaw.json"] = (
-        REPO / "tests" / "config" / "claude-cli.json"
-    ).read_text()
-    container = pod["spec"]["containers"][0]
-    # A gateway key in the pod env, as a person could set it for Claude Code.
-    # The test looks for it at the mock.
-    container["env"] = container["env"] + [
-        {"name": "ANTHROPIC_AUTH_TOKEN", "value": POD_ENV_KEY}
-    ]
-    # The managed settings of Claude Code (its admin policy file). The
-    # directory is a ConfigMap, so that the test can change the file.
-    container["volumeMounts"] = container["volumeMounts"] + [
-        {"name": "claude-managed", "mountPath": "/etc/claude-code", "readOnly": True}
-    ]
-    pod["spec"]["volumes"].append(
-        {"name": "claude-managed", "configMap": {"name": "claude-managed-settings"}}
-    )
-    managed = config_map(
-        "claude-managed-settings",
-        AGENT_NS,
-        {
-            "managed-settings.json": (
-                REPO / "tests" / "claude-cli" / "managed-settings.json"
-            ).read_text()
-        },
-    )
-    # Egress: DNS, the mock and the collector, and OpenShell. Nothing else,
-    # so no call can reach a model API on the internet.
-    policy = {
-        "apiVersion": "networking.k8s.io/v1",
-        "kind": "NetworkPolicy",
-        "metadata": {"name": "agent-egress", "namespace": AGENT_NS},
-        "spec": {
-            "podSelector": {"matchLabels": {"app": "agent"}},
-            "policyTypes": ["Egress"],
-            "egress": [
-                {
-                    "to": [
-                        {
-                            "namespaceSelector": {
-                                "matchLabels": {
-                                    "kubernetes.io/metadata.name": "kube-system"
-                                }
-                            },
-                            "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
-                        }
-                    ],
-                    "ports": [
-                        {"protocol": "UDP", "port": 53},
-                        {"protocol": "TCP", "port": 53},
-                    ],
-                },
-                {
-                    "to": [
-                        {
-                            "namespaceSelector": {
-                                "matchLabels": {"kubernetes.io/metadata.name": ns}
-                            }
-                        }
-                        for ns in (SUPPORT_NS, OPENSHELL_NS)
-                    ]
-                },
-            ],
-        },
-    }
-    return [secret, config, managed, policy, pod]
-
-
-def bridge(pins, image):
-    """The bridge spike and LiteLLM, in the test support namespace."""
-    home = [
-        {"name": "home", "mountPath": "/home/bridge"},
-        {"name": "tmp", "mountPath": "/tmp"},
-    ]
-    container = {
-        "name": "bridge",
-        "image": image,
-        "imagePullPolicy": "Never",
-        "env": [
-            {"name": "PORT", "value": "8080"},
-            {"name": "HOST", "value": "0.0.0.0"},
-            {"name": "HOME", "value": "/home/bridge"},
-            # The upstream of the Agent SDK: the mock, with a fake key.
-            {
-                "name": "ANTHROPIC_BASE_URL",
-                "value": "http://mock-model.test-support.svc.cluster.local:8000/bridge-upstream",
-            },
-            {"name": "ANTHROPIC_API_KEY", "value": BRIDGE_ENV_KEY},
-            # Keep the number of Claude Code processes small on the runner.
-            {"name": "BRIDGE_IDLE_SECONDS", "value": "300"},
-            {"name": "BRIDGE_MAX_SESSIONS", "value": "6"},
-        ],
-        "ports": [{"containerPort": 8080}],
-        "readinessProbe": {"tcpSocket": {"port": 8080}, "periodSeconds": 2},
-        "volumeMounts": home,
-        "resources": {
-            "requests": {"cpu": "100m", "memory": "256Mi"},
-            "limits": {"memory": "4Gi"},
-        },
-    }
-    items = [
-        deployment(
-            "bridge",
-            SUPPORT_NS,
-            container,
-            [{"name": "home", "emptyDir": {}}, {"name": "tmp", "emptyDir": {}}],
-        ),
-        service("bridge", SUPPORT_NS, [("http", 8080)]),
-    ]
-    # LiteLLM: one Anthropic entry whose API base is the bridge, no database,
-    # and a fake master key (v1.109.0 refuses to start without one). The config is JSON, which is
-    # YAML too.
-    litellm_config = {
-        "model_list": [
-            {
-                "model_name": "claude-opus-4-6",
-                "litellm_params": {
-                    "model": "anthropic/claude-opus-4-6",
-                    "api_base": "http://bridge.test-support.svc.cluster.local:8080",
-                    "api_key": "dummy-litellm-to-bridge-key",
-                },
-            }
-        ],
-        "litellm_settings": {"telemetry": False},
-    }
-    litellm = {
-        "name": "litellm",
-        "image": from_lines("tests/bridge-spike/Dockerfile")["litellm"],
-        "args": ["--config", "/etc/litellm/config.yaml", "--port", "4000"],
-        "env": [
-            {"name": "HOME", "value": "/tmp"},
-            {"name": "LITELLM_TELEMETRY", "value": "False"},
-            {"name": "LITELLM_MASTER_KEY", "value": LITELLM_MASTER_KEY},
-        ],
-        "ports": [{"containerPort": 4000}],
-        "readinessProbe": {"tcpSocket": {"port": 4000}, "periodSeconds": 5},
-        "volumeMounts": [
-            {"name": "config", "mountPath": "/etc/litellm"},
-            {"name": "tmp", "mountPath": "/tmp"},
-        ],
-        "resources": {
-            "requests": {"cpu": "100m", "memory": "256Mi"},
-            "limits": {"memory": "2Gi"},
-        },
-    }
-    proxy = deployment(
-        "litellm",
-        SUPPORT_NS,
-        litellm,
-        [
-            {"name": "config", "configMap": {"name": "litellm"}},
-            {"name": "tmp", "emptyDir": {}},
-        ],
-    )
-    # The test starts it (one replica) when it needs it, so that it takes no
-    # memory of the runner before. The image writes below its own directory
-    # at start, so its root is not read only. The rest of the restricted
-    # context stays.
-    proxy["spec"]["replicas"] = 0
-    proxy["spec"]["template"]["spec"]["containers"][0]["securityContext"] = dict(
-        RESTRICTED, readOnlyRootFilesystem=False
-    )
-    items += [
-        config_map(
-            "litellm", SUPPORT_NS, {"config.yaml": json.dumps(litellm_config, indent=2)}
-        ),
-        proxy,
-        service("litellm", SUPPORT_NS, [("http", 4000)]),
-    ]
-    return items
-
-
-def bridge_agent(pins, image):
-    """The agent pod of the bridge spike: the model provider is the bridge."""
-    items = agent(pins, image)
-    items[1]["data"]["openclaw.json"] = (
-        REPO / "tests" / "config" / "bridge.json"
-    ).read_text()
-    return items
-
-
-MODES = {
-    "support": None,
-    "agent": agent,
-    "claude-agent": claude_agent,
-    "bridge": bridge,
-    "bridge-agent": bridge_agent,
-}
-
-
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in MODES:
+    if len(sys.argv) != 3 or sys.argv[1] not in ("support", "agent"):
         sys.exit(__doc__)
     pins = image_pins()
-    if sys.argv[1] == "support":
-        items = support(pins)
-    else:
-        items = MODES[sys.argv[1]](pins, sys.argv[2])
+    items = support(pins) if sys.argv[1] == "support" else agent(pins, sys.argv[2])
     print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}, indent=1))
 
 
