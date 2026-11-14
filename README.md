@@ -23,10 +23,10 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | State directory | `/home/node/.openclaw`: the state volume, `subPath: state`. The workspace is `/home/node/.openclaw/workspace` |
 | Archive directory | `/home/node/.openclaw-archives`: the same volume, `subPath: archives`. It is outside the state directory, so the sandbox plugin never copies it |
 | Port | 18789, on loopback. `/healthz` and `/readyz` answer on it |
-| Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox` and `/opt/openclaw/plugins/node_modules/@openclaw/signal`. The config names them in `plugins.load.paths` |
+| Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox`, `/opt/openclaw/plugins/node_modules/@openclaw/signal` and `/opt/openclaw/plugins/node_modules/@openclaw/brave-plugin`. The config names them in `plugins.load.paths` |
 | OpenShell client certificate | `ca.crt`, `tls.crt` and `tls.key` in `/home/node/.config/openshell/gateways/<endpoint>/mtls/`. `<endpoint>` is the `gatewayEndpoint` of the plugin config with each `:` and `/` as `_`: for `https://openshell.<ns>.svc.cluster.local:8080` it is `https___openshell.<ns>.svc.cluster.local_8080` |
 | Env, set by the pod | `XDG_CACHE_HOME=/home/node/.openclaw/.cache` |
-| Env, secret | `OPENCLAW_GATEWAY_TOKEN` (the gateway), `LITELLM_API_KEY` (the model gateway, named in the config as `${LITELLM_API_KEY}`), `TELEGRAM_BOT_TOKEN` (the Telegram channel). Each other private value of the config is a `${NAME}` in the config and an env var from a Secret |
+| Env, secret | `OPENCLAW_GATEWAY_TOKEN` (the gateway), `LITELLM_API_KEY` (the model gateway, named in the config as `${LITELLM_API_KEY}`), `TELEGRAM_BOT_TOKEN` (the Telegram channel), `BRAVE_API_KEY` (the Brave provider of `web_search`, read from the env by the plugin, not named in the config). Each other private value of the config is a `${NAME}` in the config and an env var from a Secret |
 
 The product runs `openclaw doctor --fix` in its own entrypoint script, and
 doctor writes to the config file. With a read-only config that fails, so
@@ -83,8 +83,9 @@ failed test means no image.
    trust domain is in the image; the gateway starts with a read-only root,
    no capability and a read-only config, and loads the plugins; a `${NAME}`
    in the config takes the value of the env var; the config does not
-   change; doctor works on a copy. `task test` runs this part on a
-   workstation.
+   change; doctor works on a copy; a web search goes to the search endpoint
+   of the config, a fake one in the container, with the key from the env.
+   `task test` runs this part on a workstation.
 2. **The tool test** ([`tests/test_tools.py`](tests/test_tools.py), CI
    only): one turn of the agent calls each tool that runs code (`exec`;
    `exec` in the background, then `process`; `exec` with `host` and

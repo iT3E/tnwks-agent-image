@@ -74,7 +74,8 @@ COPY --from=plugins /opt/openclaw/plugins /opt/openclaw/plugins
 # the volume over both paths. Here they only get the right owner and mode.
 RUN install -d -m 0700 -o 1000 -g 1000 /home/node/.openclaw-archives \
  && openshell --version \
- && test -d /opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox
+ && test -d /opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox \
+ && test -d /opt/openclaw/plugins/node_modules/@openclaw/brave-plugin
 
 ARG VERSION=dev
 ARG REVISION=unknown

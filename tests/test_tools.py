@@ -47,6 +47,9 @@ KNOWN_TOOLS = {
     "sessions_yield",
     "tool_describe",
     "tool_search",
+    # The search of the web. It runs in the gateway, not in a sandbox: one
+    # HTTP call to the search endpoint of the config. It runs no code.
+    "web_search",
     "write",
 }
 # The tools of the product that run code. Each one must be offered and run in

@@ -1,0 +1,3 @@
+kind: Added
+body: 'The Brave plugin (@openclaw/brave-plugin, at the release of the product) for the web_search tool; it reads its key from BRAVE_API_KEY, and the image test runs one search against a fake endpoint'
+time: 2026-11-14T22:40:00.000000000Z
