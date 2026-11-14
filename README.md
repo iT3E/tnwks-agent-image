@@ -71,6 +71,40 @@ repository.
 | The images of the test cluster | [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. A change there makes no release |
 | kind, helm, kubectl | [`tests/kind/up.sh`](tests/kind/up.sh), a version and a sha256 each | By hand, from the checksum file of each release. Renovate does not read files under `tests/` |
 
+## The image age check
+
+Renovate proposes each OpenClaw update, but a pull request can wait or
+fail, and Renovate itself can stop. So a scheduled check
+([`bin/image-age`](bin/image-age)) fails when a newer stable OpenClaw
+release came out more than 14 days ago and the `Dockerfile` still pins the
+old one. The workflow `image-age.yaml` runs it each day and on demand.
+
+- **The releases:** the tags of `ghcr.io/openclaw/openclaw`, the same list
+  that Renovate reads. A stable release is a tag that Renovate can propose
+  for the pin: numbers only, with as many parts as the pin. So a pre-release
+  (`-beta.1`, `rc1`) or a variant (`-slim`) does not count.
+- **The age:** the registry gives no publish date for a tag. So the date
+  of a release is the `created` time in the config of its linux/amd64
+  image. The registry gets the tag after the build, so this date is a
+  little early and the check is a little strict.
+- **The first newer release:** of the stable releases newer than the pin,
+  the one that came out first. The check passes when there is none, or
+  when it is 14 days old or less (`MAX_AGE_DAYS`, or `--max-days`).
+- **Three results:** `OK` (exit 0), `TOO OLD` (exit 1), and `CHECK ERROR`
+  (exit 2) when the registry fails twice (one retry after 30 seconds) or a
+  pin or a date can not be read. A check error says nothing about the age
+  of the image. Both failures fail the run.
+- **The notice:** a failed run is a GitHub notification, not an alert. For
+  a scheduled run, GitHub sends it to the person who last changed the cron
+  line of the workflow. Keep that person the owner, and keep failed
+  workflow notifications on in the GitHub notification settings.
+- **No secrets:** the image is public, and the registry gives an anonymous
+  pull token. The job has `contents: read` only.
+
+Run it locally: `bin/image-age`. The unit tests use recorded registry
+answers in [`tests/image-age/`](tests/image-age): `cd tests && python3 -m
+unittest -v test_image_age`.
+
 ## The tests
 
 `bin/image-test <image ref>` is the test of the image job in CI. The job
