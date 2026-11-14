@@ -302,6 +302,16 @@ class ImageAgeTest(unittest.TestCase):
         self.assertEqual(code, image_age.EXIT_CHECK_ERROR)
         self.assertIn("CHECK ERROR (not an age verdict)", printed.call_args[0][0])
 
+    def test_main_unexpected_error_is_not_too_old(self):
+        """A bug or an odd answer must not exit 1, the code of TOO OLD."""
+        with (
+            unittest.mock.patch.object(image_age, "check", side_effect=KeyError("x")),
+            unittest.mock.patch("builtins.print") as printed,
+        ):
+            code = image_age.main([])
+        self.assertEqual(code, image_age.EXIT_CHECK_ERROR)
+        self.assertIn("CHECK ERROR", printed.call_args[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -153,7 +153,10 @@ class Registry:
         status, _, body = self._get(realm + "?" + urllib.parse.urlencode(params), {})
         if status != 200:
             raise CheckError(f"token request: HTTP {status}")
-        data = json.loads(body)
+        try:
+            data = json.loads(body)
+        except ValueError as err:
+            raise CheckError(f"token request: not JSON: {err}") from err
         token = data.get("token") or data.get("access_token")
         if not token:
             raise CheckError("token request: no token in the answer")
@@ -257,8 +260,8 @@ def main(argv=None):
         code, line = check(
             pin, Registry(), dt.datetime.now(dt.timezone.utc), args.max_days
         )
-    except (CheckError, OSError) as err:
-        code, line = EXIT_CHECK_ERROR, f"CHECK ERROR (not an age verdict): {err}"
+    except Exception as err:  # any failure is a check error, never exit 1
+        code, line = EXIT_CHECK_ERROR, f"CHECK ERROR (not an age verdict): {err!r}"
     prefix = "::error::" if annotate and code != EXIT_OK else ""
     print(f"{prefix}image-age: {IMAGE}: {line}")
     return code
