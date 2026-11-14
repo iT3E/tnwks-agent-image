@@ -28,9 +28,10 @@ concurrency:
 jobs:
   image-age:
     name: image-age
-    # The repo's self-hosted runner (python3 and git are in its image);
-    # CI_RUNNER=ubuntu-latest sends it back to GitHub-hosted runners.
-    runs-on: ${{ vars.CI_RUNNER || 'tnwks-agent-image' }}
+    # A GitHub-hosted runner, the default of the other callers of this
+    # repo. A literal label: no variable can point this job at another
+    # runner.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
