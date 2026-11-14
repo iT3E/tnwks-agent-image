@@ -1,0 +1,53 @@
+---
+name: "Image age"
+
+# The image age check (bin/image-age, README "The image age check"). It
+# fails when a newer stable OpenClaw release came out more than 14 days ago
+# and the Dockerfile still pins the old one. Not managed by the template.
+#
+# A failed scheduled run is a GitHub notification to the person who last
+# changed the cron line below, so keep that person the owner. The schedule
+# avoids the start of the hour, when GitHub can delay or drop scheduled runs.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bin/image-age"
+      - "tests/test_image_age.py"
+      - "tests/image-age/**"
+      - ".github/workflows/image-age.yaml"
+
+permissions: {}
+
+concurrency:
+  group: image-age-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-age:
+    name: image-age
+    # The repo's self-hosted runner (python3 and git are in its image);
+    # CI_RUNNER=ubuntu-latest sends it back to GitHub-hosted runners.
+    runs-on: ${{ vars.CI_RUNNER || 'tnwks-agent-image' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Unit tests
+        working-directory: tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest -v test_image_age
+
+      # Only the schedule and a manual run ask the registry. A pull request
+      # runs the unit tests only, so an old pin never fails an unrelated PR.
+      - name: Image age
+        if: github.event_name != 'pull_request'
+        run: bin/image-age
