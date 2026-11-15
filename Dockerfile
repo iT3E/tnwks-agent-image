@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # The derived image of the tnwks agent platform: OpenClaw at one release, the
-# OpenShell CLI, and the plugins of plugins.txt. One image serves the agent
+# OpenShell CLI, the plugins of plugins.txt, and the npm cache of the plugins
+# of official-plugins.txt. One image serves the agent
 # pod of each trust domain. Nothing of a trust domain is in it: no config, no
 # workspace, no state and no secret. Those come from the ops repository and
 # from the state volume at run time. README.md has the image contract.
@@ -61,6 +62,30 @@ RUN set -eu; \
     ln -s /app node_modules/openclaw; \
     chmod -R a+rX,go-w /opt/openclaw/plugins
 
+# ---- the official plugins ----
+# Each package of official-plugins.txt, at the release of the product, in an
+# npm cache. The pod installs them from this cache with the installer of the
+# product, with no network (image/install-official-plugins): that install
+# makes each one a verified official install. This stage runs the same
+# installer, with the network, so that the cache holds each request it makes.
+FROM product AS official-plugins
+USER root
+COPY official-plugins.txt /opt/openclaw/official-plugins.txt
+RUN set -eu; \
+    version="$(node -p "require('/app/package.json').version")"; \
+    mkdir -p /opt/openclaw/npm-cache /tmp/seed; \
+    printf 'cache=/opt/openclaw/npm-cache\n' > /tmp/npmrc; \
+    printf '{}\n' > /tmp/seed/openclaw.json; \
+    sed -e 's/#.*//' /opt/openclaw/official-plugins.txt | while read -r id package; do \
+      [ -n "${id}" ] || continue; \
+      OPENCLAW_STATE_DIR=/tmp/seed OPENCLAW_CONFIG_PATH=/tmp/seed/openclaw.json \
+      NPM_CONFIG_USERCONFIG=/tmp/npmrc OPENCLAW_NO_AUTO_UPDATE=1 DO_NOT_TRACK=1 \
+        node /app/openclaw.mjs plugins install "${package}@${version}" --pin --no-enable; \
+    done; \
+    rm -rf /tmp/seed /tmp/npmrc /opt/openclaw/npm-cache/_logs \
+      /opt/openclaw/npm-cache/_update-notifier-last-checked; \
+    chmod -R a+rX,go-w /opt/openclaw/npm-cache
+
 # ---- the image ----
 FROM product
 USER root
@@ -68,6 +93,9 @@ USER root
 COPY --from=openshell-cli /out/openshell /usr/local/bin/openshell
 COPY --from=openshell-cli /out/openshell.release /opt/openclaw/openshell.release
 COPY --from=plugins /opt/openclaw/plugins /opt/openclaw/plugins
+COPY --from=official-plugins /opt/openclaw/npm-cache /opt/openclaw/npm-cache
+COPY official-plugins.txt /opt/openclaw/official-plugins.txt
+COPY image/install-official-plugins /usr/local/bin/install-official-plugins
 
 # The archive directory of the state volume is outside the state directory,
 # so the backup command and the sandbox plugin never copy it. The pod mounts
@@ -75,7 +103,16 @@ COPY --from=plugins /opt/openclaw/plugins /opt/openclaw/plugins
 RUN install -d -m 0700 -o 1000 -g 1000 /home/node/.openclaw-archives \
  && openshell --version \
  && test -d /opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox \
- && test -d /opt/openclaw/plugins/node_modules/@openclaw/brave-plugin
+ && chmod 0755 /usr/local/bin/install-official-plugins
+
+# The official plugins step, with no network (npm offline), into a state
+# directory that goes away: the cache holds each request of the installer.
+RUN set -eu; \
+    mkdir -p /tmp/check; \
+    printf '{}\n' > /tmp/check/openclaw.json; \
+    OPENCLAW_STATE_DIR=/tmp/check OPENCLAW_CONFIG_PATH=/tmp/check/openclaw.json \
+    OPENCLAW_NO_AUTO_UPDATE=1 DO_NOT_TRACK=1 install-official-plugins; \
+    rm -rf /tmp/check
 
 ARG VERSION=dev
 ARG REVISION=unknown

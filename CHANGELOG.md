@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.4.0 - 2026-11-15
+
+### Changed
+
+* The Brave plugin is a verified official install, so that web_search works in a sandboxed session: the image holds it in an npm cache, not at /opt/openclaw/plugins/node_modules/@openclaw/brave-plugin, and the new official plugins step (install-official-plugins, an init container before doctor) installs it in the state directory with no network, again at each start, and stops the start for any other plugin in the state. This changes the image contract. Remove the Brave path from plugins.load.paths. The tool test runs a web search in a sandboxed session
+
 ## v0.3.0 - 2026-11-15
 
 ### Added
