@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""The image age check: is the pinned OpenClaw release current?
+
+The check fails when a newer stable release of the product exists and the
+first of them came out more than MAX_AGE_DAYS days ago. Renovate proposes
+each update. This check finds an update that waits too long: a pull request
+that waits or fails, or a Renovate that does not run.
+
+Usage: bin/image-age [--dockerfile PATH] [--max-days N]
+
+It reads the pin from the first FROM line of the Dockerfile. It reads the
+releases from the same place as Renovate: the tags of the image in its
+registry (the docker datasource), and it counts a tag as Renovate does (the
+docker versioning: no suffix, no pre-release, the same number of parts as
+the pin). The registry gives no publish date for a tag, so the date of a
+release is the `created` time in the config of its linux/amd64 image. The
+registry gets the tag after the build, so this date is a little early, and
+the check is a little strict, never late.
+
+Exit codes:
+  0  OK: no newer stable release, or the first one is MAX_AGE_DAYS days old
+     or less.
+  1  TOO OLD: the first newer stable release is older than MAX_AGE_DAYS.
+  2  CHECK ERROR: the check could not get an answer (a registry error after
+     one retry, or a pin or a date it can not read). This says nothing about
+     the age of the image.
+
+Standard library only. It needs no token: the image is public, and the
+registry gives an anonymous pull token.
+"""
+
+import argparse
+import datetime as dt
+import http.client
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+IMAGE = "ghcr.io/openclaw/openclaw"
+MAX_AGE_DAYS = 14
+PLATFORM = ("linux", "amd64")
+RETRY_WAIT_SECONDS = 30
+TIMEOUT_SECONDS = 30
+TAGS_PAGE_SIZE = 1000
+
+EXIT_OK = 0
+EXIT_TOO_OLD = 1
+EXIT_CHECK_ERROR = 2
+
+MANIFEST_TYPES = ", ".join(
+    [
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    ]
+)
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+class CheckError(Exception):
+    """The check could not get an answer. It is not a verdict on the image."""
+
+
+def read_pin(dockerfile_text, image=IMAGE):
+    """The tag of the one FROM line of the image, without the digest."""
+    pattern = re.compile(
+        rf"^FROM\s+{re.escape(image)}:([^\s@]+)(?:@sha256:[0-9a-f]{{64}})?(?:\s|$)",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    found = pattern.findall(dockerfile_text)
+    if len(found) != 1:
+        raise CheckError(f"expected one FROM line of {image}, found {len(found)}")
+    return found[0]
+
+
+def parse_version(tag):
+    """A stable version as a tuple of numbers, or None.
+
+    The docker versioning of Renovate: a suffix after `-` (`-slim`,
+    `-beta.1`) is another variant, and letters after the numbers (`rc1`)
+    make a pre-release. Neither is a stable release of the pin's variant.
+    """
+    if not re.fullmatch(r"\d+(?:\.\d+)*", tag):
+        return None
+    return tuple(int(part) for part in tag.split("."))
+
+
+def newer_stable(tags, pin):
+    """The stable tags newer than the pin, in version order."""
+    pinned = parse_version(pin)
+    if pinned is None:
+        raise CheckError(f"the pin {pin!r} is not a stable version")
+    newer = []
+    for tag in tags:
+        version = parse_version(tag)
+        if version and len(version) == len(pinned) and version > pinned:
+            newer.append(tag)
+    return sorted(newer, key=parse_version)
+
+
+def parse_time(value):
+    """An RFC 3339 time with up to nine digits of a second, as UTC."""
+    m = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})",
+        value or "",
+    )
+    if not m:
+        raise CheckError(f"can not read the time {value!r}")
+    base, fraction, zone = m.groups()
+    text = base + "." + (fraction or "0")[:6].ljust(6, "0")
+    text += "+00:00" if zone == "Z" else zone
+    return dt.datetime.fromisoformat(text).astimezone(dt.timezone.utc)
+
+
+def http_get(url, headers):
+    """One GET: (status, headers, body). An HTTP error status is a result."""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers, err.read()
+
+
+class Registry:
+    """An OCI distribution registry, read anonymously."""
+
+    def __init__(
+        self, image=IMAGE, get=http_get, sleep=time.sleep, wait=RETRY_WAIT_SECONDS
+    ):
+        host, _, self.repository = image.partition("/")
+        self.origin = f"https://{host}"
+        self.base = f"{self.origin}/v2/{self.repository}"
+        self._get = get
+        self._sleep = sleep
+        self._wait = wait
+        self._token = None
+
+    def _token_from(self, challenge):
+        """A pull token from the realm of a `WWW-Authenticate: Bearer` challenge."""
+        params = dict(re.findall(r'(\w+)="([^"]*)"', challenge or ""))
+        if not (challenge or "").lower().startswith("bearer") or "realm" not in params:
+            raise CheckError(f"unexpected auth challenge {challenge!r}")
+        realm = params.pop("realm")
+        status, _, body = self._get(realm + "?" + urllib.parse.urlencode(params), {})
+        if status != 200:
+            raise CheckError(f"token request: HTTP {status}")
+        try:
+            data = json.loads(body)
+        except ValueError as err:
+            raise CheckError(f"token request: not JSON: {err}") from err
+        token = data.get("token") or data.get("access_token")
+        if not token:
+            raise CheckError("token request: no token in the answer")
+        return token
+
+    def _once(self, url, accept):
+        headers = {"Accept": accept}
+        if self._token:
+            headers["Authorization"] = "Bearer " + self._token
+        status, response_headers, body = self._get(url, headers)
+        if status == 401 and not self._token:
+            self._token = self._token_from(response_headers.get("WWW-Authenticate"))
+            headers["Authorization"] = "Bearer " + self._token
+            status, response_headers, body = self._get(url, headers)
+        if status != 200:
+            raise CheckError(f"HTTP {status}")
+        try:
+            return response_headers, json.loads(body)
+        except ValueError as err:
+            raise CheckError(f"not JSON: {err}") from err
+
+    def get_json(self, url, accept="application/json"):
+        """The JSON at the URL. One retry after any error, then CheckError."""
+        try:
+            return self._once(url, accept)
+        except (CheckError, OSError, http.client.HTTPException) as first:
+            self._sleep(self._wait)
+            try:
+                return self._once(url, accept)
+            except (CheckError, OSError, http.client.HTTPException) as second:
+                raise CheckError(
+                    f"registry request failed twice: {url}: {first}; then {second}"
+                ) from second
+
+    def tags(self):
+        """Every tag of the image, page by page (the Link header)."""
+        url = f"{self.base}/tags/list?n={TAGS_PAGE_SIZE}"
+        tags = []
+        while url:
+            headers, data = self.get_json(url)
+            tags.extend(data.get("tags") or [])
+            m = re.search(r'<([^>]+)>\s*;\s*rel="next"', headers.get("Link") or "")
+            url = urllib.parse.urljoin(self.origin, m.group(1)) if m else None
+        return tags
+
+    def created(self, tag):
+        """The `created` time in the config of the tag's linux/amd64 image."""
+        _, manifest = self.get_json(f"{self.base}/manifests/{tag}", MANIFEST_TYPES)
+        if "manifests" in manifest:
+            digests = [
+                m["digest"]
+                for m in manifest["manifests"]
+                if (
+                    m.get("platform", {}).get("os"),
+                    m.get("platform", {}).get("architecture"),
+                )
+                == PLATFORM
+            ]
+            if not digests:
+                raise CheckError(f"{tag}: no {'/'.join(PLATFORM)} image")
+            _, manifest = self.get_json(
+                f"{self.base}/manifests/{digests[0]}", MANIFEST_TYPES
+            )
+        try:
+            config_digest = manifest["config"]["digest"]
+        except (KeyError, TypeError) as err:
+            raise CheckError(f"{tag}: no config in the manifest") from err
+        _, config = self.get_json(f"{self.base}/blobs/{config_digest}")
+        return parse_time(config.get("created"))
+
+
+def check(pin, registry, now, max_days=MAX_AGE_DAYS):
+    """(exit code, one line) for the pin. CheckError when there is no answer."""
+    tags = registry.tags()
+    newer = newer_stable(tags, pin)
+    note = "" if pin in tags else " (the pin is not a tag in the registry)"
+    if not newer:
+        return EXIT_OK, f"OK: {pin} is the newest stable release{note}"
+    dates = {tag: registry.created(tag) for tag in newer}
+    first = min(newer, key=lambda tag: (dates[tag], parse_version(tag)))
+    age = now - dates[first]
+    days = age.total_seconds() / 86400
+    what = (
+        f"the pin is {pin}; the first newer stable release {first} came out "
+        f"{dates[first]:%Y-%m-%dT%H:%M:%SZ}, {days:.1f} days ago "
+        f"(limit {max_days} days, {len(newer)} newer){note}"
+    )
+    if age <= dt.timedelta(days=max_days):
+        return EXIT_OK, f"OK: {what}"
+    return EXIT_TOO_OLD, f"TOO OLD: {what}"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dockerfile", type=Path, default=REPO / "Dockerfile")
+    parser.add_argument("--max-days", type=int, default=MAX_AGE_DAYS)
+    args = parser.parse_args(argv)
+    annotate = os.environ.get("GITHUB_ACTIONS") == "true"
+    try:
+        pin = read_pin(args.dockerfile.read_text())
+        code, line = check(
+            pin, Registry(), dt.datetime.now(dt.timezone.utc), args.max_days
+        )
+    except Exception as err:  # any failure is a check error, never exit 1
+        code, line = EXIT_CHECK_ERROR, f"CHECK ERROR (not an age verdict): {err!r}"
+    prefix = "::error::" if annotate and code != EXIT_OK else ""
+    print(f"{prefix}image-age: {IMAGE}: {line}")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
