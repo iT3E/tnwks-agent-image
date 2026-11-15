@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.0 - 2026-11-15
+
+### Added
+
+* The Brave plugin (@openclaw/brave-plugin, at the release of the product) for the web_search tool; it reads its key from BRAVE_API_KEY, and the image test runs one search against a fake endpoint
+
 ## v0.2.1 - 2026-11-15
 
 ### Security
