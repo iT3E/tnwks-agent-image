@@ -26,7 +26,7 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | Port | 18789, on loopback. `/healthz` and `/readyz` answer on it |
 | Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox` and `/opt/openclaw/plugins/node_modules/@openclaw/signal`. The config names them in `plugins.load.paths` |
 | Official plugins | `brave` (the Brave provider of `web_search`). The official plugins step installs it in the state directory. The config enables it in `plugins.entries` and does not name a path for it ("The official plugins") |
-| Official plugins step | `install-official-plugins`, in an init container before doctor, with the env and the mounts of the gateway. It needs no secret and no network. It prints `official-plugins id=<id> version=<version> result=current\|installed\|failed` for each plugin, and exits 1 on a failure |
+| Official plugins step | `install-official-plugins`, in an init container before doctor, with the env and the mounts of the gateway. It needs no secret and no network. It prints `official-plugins id=<id> version=<version> result=installed\|failed` for each plugin, or `official-plugins result=failed reason=<reason>`, and exits 1 on a failure. A failure stops the start of the pod |
 | OpenShell client certificate | `ca.crt`, `tls.crt` and `tls.key` in `/home/node/.config/openshell/gateways/<endpoint>/mtls/`. `<endpoint>` is the `gatewayEndpoint` of the plugin config with each `:` and `/` as `_`: for `https://openshell.<ns>.svc.cluster.local:8080` it is `https___openshell.<ns>.svc.cluster.local_8080` |
 | Env, set by the pod | `XDG_CACHE_HOME=/home/node/.openclaw/.cache` |
 | Env, secret | `OPENCLAW_GATEWAY_TOKEN` (the gateway), `LITELLM_API_KEY` (the model gateway, named in the config as `${LITELLM_API_KEY}`), `TELEGRAM_BOT_TOKEN` (the Telegram channel), `BRAVE_API_KEY` (the Brave provider of `web_search`, read from the env by the plugin, not named in the config). Each other private value of the config is a `${NAME}` in the config and an env var from a Secret |
@@ -66,8 +66,24 @@ product. The pod has no route to the npm registry. So:
    ([`image/install-official-plugins`](image/install-official-plugins))
    runs the same installer with npm offline, from a copy of that cache. The
    code goes to `<state directory>/npm/`, and the install record to the
-   state database. When the plugin is a verified official install at the
-   release of the image already, the step changes nothing.
+   state database.
+
+The step trusts nothing that it finds in the state directory. The gateway
+runs as the same user and can write that directory, and the product
+checks no hash of installed code at a start: trust comes from the install
+record alone, and the gateway can write the record too. Changed code there
+would run in the gateway, with its secrets, at each later start, and a
+restored archive would bring back its old code. So at each start the step:
+
+- stops the start when the state holds an install record of a plugin that
+  is not in `official-plugins.txt`, or any file in
+  `<state directory>/extensions`. The image put neither there. An install
+  record puts a plugin in front of a bundled plugin of the same id
+  (`resolveDuplicatePrecedenceRank`, `src/plugins/manifest-registry-build.ts:168-200`
+  of OpenClaw 2026.11.3), so it must not stay;
+- removes `<state directory>/npm` and installs each official plugin again
+  from the image (some 8 seconds). The install rewrites the record of the
+  plugin, its source and its path too.
 
 Run the step before doctor. Doctor tries to install a configured plugin that
 is missing, from the npm registry: with no route there, it waits for the
@@ -105,7 +121,7 @@ does this ([`tests/kind/manifests.py`](tests/kind/manifests.py)).
   the release of the product, in the npm cache `/opt/openclaw/npm-cache`,
   and the official plugins step that installs them ("The official
   plugins"). The code of each one is in the state directory at run time,
-  and each start of the pod checks it against the release of the image.
+  and each start of the pod replaces it with the code of the image.
 - **An empty archive directory** with mode 0700.
 
 ## The pins and their updates
@@ -165,7 +181,9 @@ failed test means no image.
    release; each plugin is at the release of the product; no file of a
    trust domain is in the image; the npm cache holds each official plugin;
    the official plugins step installs each one with no network, as a
-   verified official install, and a second run changes nothing; the gateway
+   verified official install, again at each run; it replaces changed code
+   and a changed install record, and it stops the start for an install
+   record of another plugin or a file in `<state>/extensions`; the gateway
    starts with a read-only root,
    no capability and a read-only config, and loads the plugins; a `${NAME}`
    in the config takes the value of the env var; the config does not

@@ -8,8 +8,9 @@ first, on a workstation and in CI.
   the product.
 - The image holds nothing of a trust domain: no config, no state, no archive.
 - The official plugins step installs each plugin of official-plugins.txt
-  with no network, as a verified official install, and a second run changes
-  nothing.
+  with no network, as a verified official install, again at each run. It
+  replaces changed code and a changed install record, and it stops the start
+  for an install record of another plugin or a file in <state>/extensions.
 - The gateway starts with a read-only root and a read-only config, and loads
   the plugins. The doctor step of the product works on a copy of the config.
 - A web search goes to the search endpoint of the config with the key from
@@ -174,8 +175,8 @@ class GatewayStarts(unittest.TestCase):
             base += ["-e", f"{key}={value}"]
 
         # The first init container of the product steps: the official plugins
-        # step, with no network (the base has none). Twice: the second run
-        # finds each plugin current.
+        # step, with no network (the base has none). Twice: each run installs
+        # each plugin again.
         cls.official = [
             docker(
                 "run",
@@ -256,7 +257,7 @@ class GatewayStarts(unittest.TestCase):
             )
         for plugin_id in official_plugins():
             self.assertRegex(first.stdout, rf"id={plugin_id} .*result=installed")
-            self.assertRegex(second.stdout, rf"id={plugin_id} .*result=current")
+            self.assertRegex(second.stdout, rf"id={plugin_id} .*result=installed")
 
     def test_official_plugins_are_verified_official_installs(self):
         # A sandboxed session uses a web search provider only when it is
@@ -352,6 +353,135 @@ class GatewayStarts(unittest.TestCase):
         self.assertEqual(
             result.returncode, 0, result.stdout[-2000:] + result.stderr[-2000:]
         )
+
+
+# The shell helpers of the tests of the official plugins step: a state
+# directory in /tmp, the tree hash of a directory, and the install path and
+# trust of the Brave plugin.
+STEP_HELPERS = r"""
+set -u
+export OPENCLAW_STATE_DIR=/tmp/st XDG_CACHE_HOME=/tmp/st/.cache
+mkdir -p /tmp/st
+echo '{"plugins":{"entries":{"brave":{"enabled":true}}}}' > /tmp/st/openclaw.json
+tree() { (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64); }
+brave() {
+  node /app/openclaw.mjs plugins inspect brave --json 2>/dev/null | node -e '
+    let s = "";
+    process.stdin.on("data", d => (s += d)).on("end", () => {
+      const j = JSON.parse(s.slice(s.indexOf("{")));
+      console.log(j.install.installPath + " " + j.plugin.trust.reason);
+    });'
+}
+"""
+
+# Points the install record of the Brave plugin to another directory, in the
+# state database, as a process that can write the state could.
+MOVE_RECORD = r"""
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync("/tmp/st/state/openclaw.sqlite");
+const key = "plugins.installedIndex";
+const row = db.prepare("select value_json from config_machine_state where state_key = ?").get(key);
+const index = JSON.parse(row.value_json);
+index.index.installRecords.brave.installPath = process.argv[2];
+db.prepare("update config_machine_state set value_json = ? where state_key = ?").run(JSON.stringify(index), key);
+"""
+
+# A plugin with the id of a bundled plugin (memory-core), from a local path.
+SAME_ID_PLUGIN = r"""
+mkdir -p /tmp/same-id
+cat > /tmp/same-id/package.json <<'JSON'
+{"name": "test-same-id", "version": "1.0.0", "type": "module", "openclaw": {"extensions": ["./index.js"]}}
+JSON
+cat > /tmp/same-id/openclaw.plugin.json <<'JSON'
+{"id": "memory-core", "name": "Test", "description": "test", "configSchema": {"type": "object", "properties": {}}}
+JSON
+echo 'export default { id: "memory-core", name: "Test", description: "test", register() {} };' > /tmp/same-id/index.js
+cp /tmp/st/openclaw.json /tmp/config-copy.json
+OPENCLAW_CONFIG_PATH=/tmp/config-copy.json node /app/openclaw.mjs plugins install /tmp/same-id \
+  --force --no-enable --accept-capabilities > /dev/null 2>&1
+"""
+
+
+def in_step_container(script):
+    """A script in a container of the image as the pod runs the step: no
+    network, a read-only root, and the state in /tmp."""
+    return docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--tmpfs",
+        "/tmp:uid=1000,gid=1000,mode=0700",
+        IMAGE_REF,
+        "sh",
+        "-c",
+        STEP_HELPERS + script,
+        check=False,
+        timeout=600,
+    )
+
+
+@unittest.skipUnless(IMAGE_REF, "IMAGE_REF is not set")
+class OfficialPluginsStepTrustsNothingInTheState(unittest.TestCase):
+    """The gateway can write the state directory, and the product checks no
+    hash of installed code. So the step installs the code again at each run
+    and stops the start for any other plugin in the state."""
+
+    def test_changed_code_and_record_are_replaced(self):
+        out = in_step_container(
+            "cat > /tmp/move-record.js <<'JS'\n"
+            + MOVE_RECORD
+            + "JS\n"
+            + r"""
+install-official-plugins > /dev/null || exit 1
+set -- $(brave); first="$1"
+echo "first $1 $2 $(tree "$1")"
+echo '// CHANGED' >> "$first/dist/index.js"
+mkdir -p /tmp/st/other && cp -R "$first" /tmp/st/other/brave-plugin
+echo '// CHANGED' >> /tmp/st/other/brave-plugin/dist/index.js
+node /tmp/move-record.js /tmp/st/other/brave-plugin 2> /dev/null
+set -- $(brave); echo "changed $1 $2"
+install-official-plugins | grep '^official-plugins'
+set -- $(brave); echo "second $1 $2 $(tree "$1")"
+echo "changed-lines $(grep -c CHANGED "$1/dist/index.js")"
+"""
+        )
+        text = out.stdout
+        self.assertEqual(out.returncode, 0, text[-2000:] + out.stderr[-2000:])
+        lines = {
+            line.split()[0]: line.split()[1:]
+            for line in text.splitlines()
+            if line.split()
+        }
+        first, changed, second = lines["first"], lines["changed"], lines["second"]
+        self.assertEqual(changed[0], "/tmp/st/other/brave-plugin", text)
+        self.assertRegex(text, r"id=brave .*result=installed")
+        self.assertTrue(second[0].startswith("/tmp/st/npm/"), text)
+        self.assertEqual(second[1], "trusted-official")
+        self.assertEqual(second[2], first[2], "the code is not the code of the image")
+        self.assertEqual(lines["changed-lines"], ["0"])
+
+    def test_another_install_record_stops_the_start(self):
+        out = in_step_container(SAME_ID_PLUGIN + "install-official-plugins; echo rc=$?")
+        self.assertIn(
+            "official-plugins result=failed reason=an install record of another plugin: memory-core",
+            out.stdout,
+        )
+        self.assertIn("rc=1", out.stdout)
+
+    def test_a_file_in_extensions_stops_the_start(self):
+        out = in_step_container(
+            "mkdir -p /tmp/st/extensions/extra && echo x > /tmp/st/extensions/extra/index.js; "
+            "install-official-plugins; echo rc=$?"
+        )
+        self.assertIn(
+            "official-plugins result=failed reason=files in /tmp/st/extensions",
+            out.stdout,
+        )
+        self.assertIn("rc=1", out.stdout)
 
 
 if __name__ == "__main__":
