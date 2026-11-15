@@ -1,7 +1,8 @@
 # tnwks-agent-image
 
 The derived image of the tnwks agent platform: OpenClaw at one release, the
-OpenShell CLI, and the plugins of [`plugins.txt`](plugins.txt). One image
+OpenShell CLI, the plugins of [`plugins.txt`](plugins.txt), and the npm
+cache of the plugins of [`official-plugins.txt`](official-plugins.txt). One image
 serves the agent pod of each trust domain. Nothing of a trust domain is in
 it: no config, no workspace, no state, no secret. Those come from tnwks-ops
 and from the state volume at run time.
@@ -23,7 +24,9 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | State directory | `/home/node/.openclaw`: the state volume, `subPath: state`. The workspace is `/home/node/.openclaw/workspace` |
 | Archive directory | `/home/node/.openclaw-archives`: the same volume, `subPath: archives`. It is outside the state directory, so the sandbox plugin never copies it |
 | Port | 18789, on loopback. `/healthz` and `/readyz` answer on it |
-| Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox`, `/opt/openclaw/plugins/node_modules/@openclaw/signal` and `/opt/openclaw/plugins/node_modules/@openclaw/brave-plugin`. The config names them in `plugins.load.paths` |
+| Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox` and `/opt/openclaw/plugins/node_modules/@openclaw/signal`. The config names them in `plugins.load.paths` |
+| Official plugins | `brave` (the Brave provider of `web_search`). The official plugins step installs it in the state directory. The config enables it in `plugins.entries` and does not name a path for it ("The official plugins") |
+| Official plugins step | `install-official-plugins`, in an init container before doctor, with the env and the mounts of the gateway. It needs no secret and no network. It prints `official-plugins id=<id> version=<version> result=installed\|failed` for each plugin, or `official-plugins result=failed reason=<reason>`, and exits 1 on a failure. A failure stops the start of the pod |
 | OpenShell client certificate | `ca.crt`, `tls.crt` and `tls.key` in `/home/node/.config/openshell/gateways/<endpoint>/mtls/`. `<endpoint>` is the `gatewayEndpoint` of the plugin config with each `:` and `/` as `_`: for `https://openshell.<ns>.svc.cluster.local:8080` it is `https___openshell.<ns>.svc.cluster.local_8080` |
 | Env, set by the pod | `XDG_CACHE_HOME=/home/node/.openclaw/.cache` |
 | Env, secret | `OPENCLAW_GATEWAY_TOKEN` (the gateway), `LITELLM_API_KEY` (the model gateway, named in the config as `${LITELLM_API_KEY}`), `TELEGRAM_BOT_TOKEN` (the Telegram channel), `BRAVE_API_KEY` (the Brave provider of `web_search`, read from the env by the plugin, not named in the config). Each other private value of the config is a `${NAME}` in the config and an env var from a Secret |
@@ -38,6 +41,63 @@ config, before the gateway:
 mkdir -p /tmp/doctor && cp /home/node/.openclaw/openclaw.json /tmp/doctor/
 OPENCLAW_CONFIG_PATH=/tmp/doctor/openclaw.json node /app/openclaw.mjs doctor --fix --non-interactive
 ```
+
+## The official plugins
+
+A sandboxed session of the product uses a `web_search` provider only when
+its plugin is bundled with the product or is a verified official install
+(`src/plugins/web-provider-resolution-shared.ts` of OpenClaw 2026.11.3). A
+plugin from `plugins.load.paths` is neither, so in a sandboxed session the
+tool fails with `web_search is unavailable. Enable or select a bundled or
+verified official search provider for sandboxed agents.` and makes no
+request. The Brave plugin is not bundled with the product, so it must be a
+verified official install.
+
+The product makes an install a verified official install when its own
+installer (`openclaw plugins install`) installed the official npm package:
+the install record in the state database names the npm source, the package
+and its integrity, and the package is in the official catalog of the
+product. The pod has no route to the npm registry. So:
+
+1. The build runs the installer of the product once, with the network, and
+   keeps its npm cache in the image (`/opt/openclaw/npm-cache`): each
+   package of `official-plugins.txt` at the release of the product.
+2. The official plugins step of the pod
+   ([`image/install-official-plugins`](image/install-official-plugins))
+   runs the same installer with npm offline, from a copy of that cache. The
+   code goes to `<state directory>/npm/`, and the install record to the
+   state database.
+
+The step trusts nothing that it finds in the state directory. The gateway
+runs as the same user and can write that directory, and the product
+checks no hash of installed code at a start: trust comes from the install
+record alone, and the gateway can write the record too. Changed code there
+would run in the gateway, with its secrets, at each later start, and a
+restored archive would bring back its old code. So at each start the step:
+
+- stops the start when the state holds an install record of a plugin that
+  is not in `official-plugins.txt`, or any file in
+  `<state directory>/extensions`. The image put neither there. An install
+  record puts a plugin in front of a bundled plugin of the same id
+  (`resolveDuplicatePrecedenceRank`, `src/plugins/manifest-registry-build.ts:168-200`
+  of OpenClaw 2026.11.3), so it must not stay;
+- removes `<state directory>/npm` and installs each official plugin again
+  from the image (some 8 seconds). The install rewrites the record of the
+  plugin, its source and its path too.
+
+Run the step before doctor. Doctor tries to install a configured plugin that
+is missing, from the npm registry: with no route there, it waits for the
+timeouts and leaves an unfinished upgrade for the plugin.
+
+```sh
+install-official-plugins   # with OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH of the gateway
+```
+
+`openclaw plugins inspect brave --json` shows the result: `origin` is
+`global`, `trustedOfficialInstall` is `true`, and `trust.reason` is
+`trusted-official`. `openclaw sandbox explain` does not show it: it shows
+the tool policy (the tool names that a sandbox allows), not the provider of
+a tool.
 
 Kubernetes makes the directory of a `subPath` as root when it is not there.
 Make `state` and `archives` on the volume, and the `/tmp` directory, as
@@ -57,6 +117,11 @@ does this ([`tests/kind/manifests.py`](tests/kind/manifests.py)).
 - **The plugins:** each npm package of `plugins.txt`, at the release of the
   product. The build installs them in `/opt/openclaw/plugins`, read only.
   The agent can not install a plugin.
+- **The official plugins:** each npm package of `official-plugins.txt`, at
+  the release of the product, in the npm cache `/opt/openclaw/npm-cache`,
+  and the official plugins step that installs them ("The official
+  plugins"). The code of each one is in the state directory at run time,
+  and each start of the pod replaces it with the code of the image.
 - **An empty archive directory** with mode 0700.
 
 ## The pins and their updates
@@ -114,7 +179,12 @@ failed test means no image.
 1. **The image** ([`tests/test_image.py`](tests/test_image.py), Docker
    only): the user and the command; the CLI is the pinned OpenShell
    release; each plugin is at the release of the product; no file of a
-   trust domain is in the image; the gateway starts with a read-only root,
+   trust domain is in the image; the npm cache holds each official plugin;
+   the official plugins step installs each one with no network, as a
+   verified official install, again at each run; it replaces changed code
+   and a changed install record, and it stops the start for an install
+   record of another plugin or a file in `<state>/extensions`; the gateway
+   starts with a read-only root,
    no capability and a read-only config, and loads the plugins; a `${NAME}`
    in the config takes the value of the env var; the config does not
    change; doctor works on a copy; a web search goes to the search endpoint
@@ -136,7 +206,9 @@ failed test means no image.
    `file_fetch`, `file_write`, `dir_list` and `dir_fetch` (the bundled
    file-transfer plugin). A second turn asks for each one by name and
    searches for them: the product must not offer one, a call must fail and
-   run nothing, and the tool search must not find one.
+   run nothing, and the tool search must not find one. A third turn runs a
+   web search in the sandboxed session: it must get to the fake search
+   endpoint of the pod, with the key, and its result must come back.
 3. **The trace test** ([`tests/test_traces.py`](tests/test_traces.py), CI
    only): a marker in the prompt, in a tool call and in the answer of the
    model must not get to the trace collector, and the spans of the turn

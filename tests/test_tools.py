@@ -11,6 +11,12 @@ probe must find there what it must not find in a sandbox.
 
 A second turn runs the plan `denied-tools`: it asks for each denied tool by
 name, offered or not, and then searches for them.
+
+A third turn runs the plan `web-search` in a sandboxed session, as each
+session of an agent is: one web search, which must get to the fake search
+endpoint of the pod and come back. A sandboxed session uses a search provider
+only when it is bundled or a verified official install, so this holds the
+official plugins step of the image.
 """
 
 import json
@@ -337,6 +343,84 @@ class DeniedToolsAreNotAvailable(unittest.TestCase):
         print(f"tool search found: {sorted(found)}")
         self.assertFalse(self.results[i]["error"], text)
         self.assertEqual(found & DENIED_TOOLS, set())
+
+
+@unittest.skipUnless(
+    os.environ.get("IMAGE_TEST_KUBECONFIG"), "no test cluster (tests/kind/up.sh)"
+)
+class WebSearchInASandboxedSession(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = load_mock().PLANS["web-search"]
+        cls.mark = uuid.uuid4().hex[:12]
+        started, cls.turn = agent_turn(
+            f"search-test-{cls.mark}", f"TOOLPLAN=web-search WRITEMARK={cls.mark}"
+        )
+        records = [r for r in mock_records(started) if r.get("plan") == "web-search"]
+        cls.last = (
+            max(records, key=lambda r: len(r.get("tool_uses", []))) if records else {}
+        )
+        index = {
+            use.get("id"): i for i, use in enumerate(cls.last.get("tool_uses", []))
+        }
+        cls.results = {}
+        for result in cls.last.get("tool_results", []):
+            if result.get("id") in index:
+                cls.results[index[result["id"]]] = result
+        cls.seen = []
+        out = kx("-n", AGENT_NS, "logs", "agent", "-c", "fake-search").stdout
+        for line in out.splitlines():
+            try:
+                cls.seen.append(json.loads(line))
+            except ValueError:
+                continue
+        print(
+            f"\nsearch turn: exit {cls.turn.returncode}, answer {cls.last.get('answer')!r}"
+        )
+        for i, step in enumerate(cls.plan):
+            result = cls.results.get(i, {})
+            text = (result.get("text") or "").replace("\n", " | ")
+            print(
+                f"step {i:2d} {step['tool']:<16} error={result.get('error')} {text[:300]}"
+            )
+
+    def test_the_session_is_sandboxed(self):
+        out = kx(
+            "-n",
+            AGENT_NS,
+            "exec",
+            "agent",
+            "-c",
+            "agent",
+            "--",
+            "node",
+            "/app/openclaw.mjs",
+            "sandbox",
+            "explain",
+            "--json",
+        ).stdout
+        explain = json.loads(out[out.index("{") :])
+        self.assertIs(explain["sandbox"]["sessionIsSandboxed"], True)
+        self.assertEqual(explain["sandbox"]["mode"], "all")
+
+    def test_the_search_comes_back(self):
+        self.assertEqual(self.turn.returncode, 0, self.turn.stderr[-3000:])
+        i = next(i for i, s in enumerate(self.plan) if s["tool"] == "dispatch_action")
+        self.assertIn(i, self.results, "no result for the web search")
+        result = self.results[i]
+        self.assertFalse(result["error"], result["text"])
+        self.assertIn(f"FAKE-SNIPPET-tnwks fake query {self.mark}", result["text"])
+        self.assertNotIn(FAKE_SECRETS["BRAVE_API_KEY"], result["text"])
+
+    def test_the_fake_endpoint_got_the_query_and_the_key(self):
+        self.assertIn(
+            {
+                "path": "/res/v1/web/search",
+                "q": f"tnwks fake query {self.mark}",
+                "key": True,
+            },
+            self.seen,
+        )
 
 
 if __name__ == "__main__":

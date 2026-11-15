@@ -3,6 +3,9 @@
 # release of the product, so one update moves the product and its plugins.
 # A plugin goes in at build time only. The agent can not install one.
 #
+# A plugin that a sandboxed session needs as a verified official install goes
+# in official-plugins.txt instead.
+#
 # The plugin id, which the config names, is in the comment.
 
 # openshell: the sandbox backend. Each shell and file tool runs in a sandbox.
@@ -10,7 +13,3 @@
 
 # signal: the Signal channel. It talks to the Signal daemon of the trust domain.
 @openclaw/signal
-
-# brave: the Brave Search provider of the web_search tool. The tool runs in
-# the gateway process, not in a sandbox.
-@openclaw/brave-plugin
