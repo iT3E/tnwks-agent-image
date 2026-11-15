@@ -10,7 +10,9 @@
   "cron": {"enabled": false},
   "tools": {
     "elevated": {"enabled": false},
-    "deny": ["code_execution", "file_fetch", "file_write", "dir_list", "dir_fetch"]
+    "deny": ["code_execution", "file_fetch", "file_write", "dir_list", "dir_fetch"],
+    "sandbox": {"tools": {"alsoAllow": ["web_search"]}},
+    "web": {"search": {"enabled": true, "provider": "brave"}}
   },
   "agents": {
     "defaults": {
@@ -44,7 +46,8 @@
     "load": {
       "paths": [
         "/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox",
-        "/opt/openclaw/plugins/node_modules/@openclaw/signal"
+        "/opt/openclaw/plugins/node_modules/@openclaw/signal",
+        "/opt/openclaw/plugins/node_modules/@openclaw/brave-plugin"
       ]
     },
     "entries": {
@@ -56,6 +59,10 @@
           "gatewayEndpoint": "https://openshell.openshell.svc.cluster.local:8080",
           "timeoutSeconds": 300
         }
+      },
+      "brave": {
+        "enabled": true,
+        "config": {"webSearch": {"baseUrl": "http://127.0.0.1:18790"}}
       },
       "diagnostics-otel": {"enabled": true}
     }

@@ -28,6 +28,7 @@ FAKE_SECRETS = {
     "OPENCLAW_GATEWAY_TOKEN": "fake-gateway-token-7f3a91",
     "LITELLM_API_KEY": "fake-model-key-2c8d04",
     "TELEGRAM_BOT_TOKEN": "fake-bot-token-9b51e6",
+    "BRAVE_API_KEY": "fake-search-key-4d2e17",
 }
 ARCHIVE_NAME = "openclaw-backup-test-archive.tar.gz"
 FILE_MARKER = "TNWKS-STATE-FILE-MARKER-5e0c72"

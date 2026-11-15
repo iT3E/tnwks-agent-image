@@ -7,6 +7,9 @@ first, on a workstation and in CI.
 - The image holds nothing of a trust domain: no config, no state, no archive.
 - The gateway starts with a read-only root and a read-only config, and loads
   the plugins. The doctor step of the product works on a copy of the config.
+- A web search goes to the search endpoint of the config with the key from
+  the env, and its result comes back. The endpoint is a fake one in the
+  container: the test calls no search vendor.
 """
 
 import hashlib
@@ -191,7 +194,7 @@ class GatewayStarts(unittest.TestCase):
             "exec", self.name, "node", "/app/openclaw.mjs", "plugins", "list", "--json"
         ).stdout
         plugins = {p["id"]: p for p in json.loads(out[out.index("{") :])["plugins"]}
-        for plugin_id in ("openshell", "signal", "diagnostics-otel"):
+        for plugin_id in ("openshell", "signal", "brave", "diagnostics-otel"):
             self.assertIn(plugin_id, plugins)
             self.assertEqual(plugins[plugin_id]["status"], "loaded", plugin_id)
         self.assertEqual(
@@ -221,6 +224,47 @@ class GatewayStarts(unittest.TestCase):
             "exec", self.name, "sha256sum", "/home/node/.openclaw/openclaw.json"
         ).stdout
         self.assertEqual(out.split()[0], self.config_hash)
+
+    def test_web_search_at_the_configured_endpoint(self):
+        # A fake Brave endpoint on loopback in the gateway container (the
+        # baseUrl of the test config), then one search with the CLI of the
+        # product. The fake logs the query and whether the key came.
+        self.assertTrue(self.ready, "the gateway did not get ready")
+        mark = uuid.uuid4().hex[:12]
+        script = (
+            "const http = require('http');"
+            "http.createServer((req, res) => {"
+            "const u = new URL(req.url, 'http://x');"
+            "const key = req.headers['x-subscription-token'] === process.env.BRAVE_API_KEY;"
+            "console.log(JSON.stringify({path: u.pathname, q: u.searchParams.get('q'), key}));"
+            "res.setHeader('content-type', 'application/json');"
+            "res.end(JSON.stringify({web: {results: [{title: 'FAKE-TITLE', "
+            "url: 'https://example.com/', description: 'FAKE-SNIPPET-' + u.searchParams.get('q')}]}}));"
+            "}).listen(18790, '127.0.0.1');"
+        )
+        out = docker(
+            "exec",
+            self.name,
+            "sh",
+            "-c",
+            'node -e "$1" > /tmp/fake-search.log 2>&1 & pid=$!; sleep 1; '
+            f"node /app/openclaw.mjs infer web search --query 'test query {mark}' --json; "
+            "kill $pid; cat /tmp/fake-search.log",
+            "sh",
+            script,
+            timeout=180,
+        ).stdout
+        lines = out.strip().splitlines()
+        seen = json.loads(lines[-1])
+        body = "\n".join(lines[:-1])
+        result = json.loads(body[body.index("{") :])
+        self.assertTrue(result["ok"], out)
+        self.assertEqual(result["provider"], "brave")
+        rows = result["outputs"][0]["result"]["results"]
+        self.assertIn(f"FAKE-SNIPPET-test query {mark}", rows[0]["description"])
+        self.assertEqual(
+            seen, {"path": "/res/v1/web/search", "q": f"test query {mark}", "key": True}
+        )
 
     def test_doctor_on_a_copy(self):
         result = self.doctor

@@ -152,6 +152,24 @@ PLANS = {
     ],
 }
 
+# One web search, with a query that holds the mark of the turn, so a test can
+# find the query at the fake search endpoint and nowhere it must not be. The
+# product offers web_search through the tool search, so the plan finds it
+# there and calls it through dispatch_action.
+PLANS["web-search"] = [
+    {
+        "tool": "tool_search",
+        "input": {"queries": [{"query": "search the web", "limit": 5}]},
+    },
+    {
+        "tool": "dispatch_action",
+        "input": {
+            "id": "web_search",
+            "args": {"query": "tnwks fake query @@WRITE_MARK@@"},
+        },
+    },
+]
+
 # The tools that are on by default in the product and that the config of the
 # agent denies: `code_execution` of the bundled xai plugin, and the file
 # transfer tools of the bundled file-transfer plugin. The plan asks for each
