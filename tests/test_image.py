@@ -15,7 +15,8 @@ first, on a workstation and in CI.
   the plugins. The doctor step of the product works on a copy of the config.
 - With plugins.allow in the config, a plugin that the state directory holds
   and the list does not name runs neither in doctor nor in the gateway: a
-  plugin in <state>/extensions, and one with an install record. A plugin in
+  plugin in <state>/extensions, one that names the configured web search
+  provider, and one with an install record. A plugin in
   <state>/extensions with the id of a bundled plugin does not take its place.
 - A web search goes to the search endpoint of the config with the key from
   the env, and its result comes back. The endpoint is a fake one in the
@@ -63,14 +64,19 @@ def official_plugins():
 # The plugins that the test puts in the state directory after the official
 # plugins step, as a process that can write the state could. Each one writes
 # a line to <state>/plugin-ran.log when it is imported and registered.
+# extra-search names the web search provider of the config (brave) in its
+# contracts: with no allow list, the product enables such a plugin by itself
+# (src/config/plugin-auto-enable.materialize.ts of OpenClaw 2026.11.3), and
+# the gateway imports it.
 STATE_PLUGINS = {
-    "extensions/extra-file": "extra-file",
-    "extensions/memory-core": "memory-core",
+    "extensions/extra-file": ("extra-file", {}),
+    "extensions/extra-search": ("extra-search", {"webSearchProviders": ["brave"]}),
+    "extensions/memory-core": ("memory-core", {}),
 }
 RECORD_PLUGIN = "extra-record"
 
 
-def plant_plugin(directory, plugin_id):
+def plant_plugin(directory, plugin_id, contracts=None):
     """Shell lines that write a test plugin to a directory."""
     package = json.dumps(
         {
@@ -86,6 +92,7 @@ def plant_plugin(directory, plugin_id):
             "name": "Test",
             "description": "test",
             "activation": {"onStartup": True},
+            "contracts": contracts or {},
             "configSchema": {"type": "object", "properties": {}},
         }
     )
@@ -246,8 +253,10 @@ class GatewayStarts(unittest.TestCase):
         # record. The official plugins step would stop a later start for
         # them; the allow list of the config must keep them out on its own.
         plant = "set -e\n"
-        for directory, plugin_id in STATE_PLUGINS.items():
-            plant += plant_plugin(f"/home/node/.openclaw/{directory}", plugin_id)
+        for directory, (plugin_id, contracts) in STATE_PLUGINS.items():
+            plant += plant_plugin(
+                f"/home/node/.openclaw/{directory}", plugin_id, contracts
+            )
         plant += plant_plugin(f"/tmp/{RECORD_PLUGIN}", RECORD_PLUGIN)
         plant += (
             "cp /home/node/.openclaw/openclaw.json /tmp/config-copy.json\n"
@@ -341,21 +350,6 @@ class GatewayStarts(unittest.TestCase):
             self.plant.stdout[-2000:] + self.plant.stderr[-2000:],
         )
         self.assertTrue(self.ready, "the gateway did not get ready")
-        out = docker(
-            "exec", self.name, "node", "/app/openclaw.mjs", "plugins", "list", "--json"
-        ).stdout
-        plugins = {}
-        for plugin in json.loads(out[out.index("{") :])["plugins"]:
-            plugins.setdefault(plugin["id"], []).append(plugin)
-        for plugin_id in ("extra-file", RECORD_PLUGIN):
-            self.assertIn(plugin_id, plugins)
-            for plugin in plugins[plugin_id]:
-                self.assertEqual(plugin["status"], "disabled", plugin)
-        # The bundled memory-core, not the one of the same id in the state.
-        loaded = [p for p in plugins["memory-core"] if p["status"] == "loaded"]
-        self.assertEqual(
-            [p["origin"] for p in loaded], ["bundled"], plugins["memory-core"]
-        )
         ran = docker(
             "exec",
             self.name,
@@ -365,6 +359,21 @@ class GatewayStarts(unittest.TestCase):
             check=False,
         ).stdout
         self.assertEqual(ran, "", "a plugin of the state ran")
+        out = docker(
+            "exec", self.name, "node", "/app/openclaw.mjs", "plugins", "list", "--json"
+        ).stdout
+        plugins = {}
+        for plugin in json.loads(out[out.index("{") :])["plugins"]:
+            plugins.setdefault(plugin["id"], []).append(plugin)
+        for plugin_id in ("extra-file", "extra-search", RECORD_PLUGIN):
+            self.assertIn(plugin_id, plugins)
+            for plugin in plugins[plugin_id]:
+                self.assertEqual(plugin["status"], "disabled", plugin)
+        # The bundled memory-core, not the one of the same id in the state.
+        loaded = [p for p in plugins["memory-core"] if p["status"] == "loaded"]
+        self.assertEqual(
+            [p["origin"] for p in loaded], ["bundled"], plugins["memory-core"]
+        )
 
     def test_official_plugins_step(self):
         first, second = self.official
