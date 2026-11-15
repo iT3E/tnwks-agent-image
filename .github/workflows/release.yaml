@@ -53,3 +53,9 @@ jobs:
       bump: ${{ inputs.bump || 'auto' }}
       build-workflow: "build.yaml"
       auto-fragment: "Dependency updates"
+      # main has a ruleset that GITHUB_TOKEN can't bypass: the release
+      # GitHub App, a bypass actor of it, pushes the release commit and tag
+      # (tnwks-ops, the GitHub Terraform root).
+      app-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
