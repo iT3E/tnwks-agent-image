@@ -7,7 +7,8 @@ Usage: manifests.py support|agent <image ref>
 - agent: the agent pod, as tnwks-ops runs it: a restricted pod, a read-only
   root, the config as a read-only file from a ConfigMap, the secrets as env
   vars from a Secret, the state and the archives on one volume, and the
-  client certificate of the OpenShell gateway.
+  client certificate of the OpenShell gateway. A fake search endpoint runs
+  next to the gateway, at the baseUrl of the Brave plugin in the test config.
 
 The image references come from the Dockerfiles (tests/support.py), so that
 Renovate moves them. The values of the test are fake.
@@ -35,6 +36,20 @@ from support import (  # noqa: E402
 # looks for its client certificate: the endpoint with each `:` and `/` as `_`.
 OPENSHELL_ENDPOINT = f"https://openshell.{OPENSHELL_NS}.svc.cluster.local:8080"
 OPENSHELL_CERT_DIR = "/home/node/.config/openshell/gateways/https___openshell.openshell.svc.cluster.local_8080/mtls"
+
+# The fake search endpoint: one JSON line for each request (the path, the
+# query and whether the key came), and one result with the query in it.
+FAKE_SEARCH = (
+    "const http = require('http');"
+    "http.createServer((req, res) => {"
+    "const u = new URL(req.url, 'http://x');"
+    "const key = req.headers['x-subscription-token'] === process.env.BRAVE_API_KEY;"
+    "console.log(JSON.stringify({path: u.pathname, q: u.searchParams.get('q'), key}));"
+    "res.setHeader('content-type', 'application/json');"
+    "res.end(JSON.stringify({web: {results: [{title: 'FAKE-TITLE', "
+    "url: 'https://example.com/', description: 'FAKE-SNIPPET-' + u.searchParams.get('q')}]}}));"
+    "}).listen(18790, '127.0.0.1');"
+)
 
 RESTRICTED = {
     "allowPrivilegeEscalation": False,
@@ -221,8 +236,11 @@ def agent(pins, image):
             f"chmod 0600 {OPENSHELL_CERT_DIR}/*",
         ]
     )
-    # The second init container runs the doctor step of the product on a
-    # copy of the config. The config is read only, and doctor writes to it.
+    # The second init container is the official plugins step of the image,
+    # before doctor: it installs the Brave plugin from the npm cache of the
+    # image as a verified official install. The third runs the doctor step of
+    # the product on a copy of the config. The config is read only, and
+    # doctor writes to it.
     doctor = (
         "mkdir -p /tmp/doctor && cp /home/node/.openclaw/openclaw.json /tmp/doctor/openclaw.json "
         "&& exec node /app/openclaw.mjs doctor --fix --non-interactive"
@@ -268,6 +286,16 @@ def agent(pins, image):
                     ],
                 },
                 {
+                    "name": "official-plugins",
+                    "image": image,
+                    "imagePullPolicy": "Never",
+                    "command": ["install-official-plugins"],
+                    "env": env,
+                    "securityContext": RESTRICTED,
+                    "volumeMounts": state,
+                    "resources": {"limits": {"memory": "2Gi"}},
+                },
+                {
                     "name": "doctor",
                     "image": image,
                     "imagePullPolicy": "Never",
@@ -307,7 +335,25 @@ def agent(pins, image):
                         "requests": {"cpu": "250m", "memory": "1Gi"},
                         "limits": {"memory": "4Gi"},
                     },
-                }
+                },
+                {
+                    "name": "fake-search",
+                    "image": image,
+                    "imagePullPolicy": "Never",
+                    "command": ["node", "-e", FAKE_SEARCH],
+                    # The fake key only, to check that the key came.
+                    "env": [
+                        {
+                            "name": "BRAVE_API_KEY",
+                            "value": FAKE_SECRETS["BRAVE_API_KEY"],
+                        }
+                    ],
+                    "securityContext": RESTRICTED,
+                    "resources": {
+                        "requests": {"cpu": "10m", "memory": "32Mi"},
+                        "limits": {"memory": "128Mi"},
+                    },
+                },
             ],
             "volumes": [
                 # An emptyDir stands for the state volume of a trust domain.

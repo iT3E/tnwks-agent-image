@@ -1,0 +1,79 @@
+#!/bin/sh
+# The official plugins step of the pod (README, "The official plugins"): it
+# installs each plugin of /opt/openclaw/official-plugins.txt with the
+# installer of the product, from the npm cache of the image, with no network.
+#
+# A sandboxed session uses a web search provider only when the plugin is
+# bundled with the product or is a verified official install. A plugin from
+# `plugins.load.paths` is neither. The installer writes the install record
+# to the state database, and that record makes the plugin a verified
+# official install. The plugin code goes to the state directory (npm/).
+#
+# Run it in an init container before doctor and the gateway, with the env of
+# the gateway (OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH) and a /tmp that it
+# can write. It needs no secret and no network. Doctor comes after it: doctor
+# tries to install a configured plugin that is missing, from the npm
+# registry, and the pod has no route there.
+#
+# It prints one line for each plugin:
+#   official-plugins id=<id> version=<version> result=current|installed|failed
+set -eu
+
+list=/opt/openclaw/official-plugins.txt
+cache=/opt/openclaw/npm-cache
+version="$(node -p "require('/app/package.json').version")"
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/official-plugins.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+
+# npm reads its cache only from a directory that it can write to.
+cp -R "$cache" "$work/npm-cache"
+printf 'cache=%s\noffline=true\n' "$work/npm-cache" > "$work/npmrc"
+export NPM_CONFIG_USERCONFIG="$work/npmrc"
+export npm_config_offline=true
+
+# The installer writes to the config, and the config of the pod is read only.
+# So it works on a copy, which goes away. The install record is in the state
+# database, not in the config.
+# The state directory, named: with no OPENCLAW_STATE_DIR, the product would
+# take the directory of the config copy as the root of the install.
+export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+cp "${OPENCLAW_CONFIG_PATH:-$OPENCLAW_STATE_DIR/openclaw.json}" "$work/openclaw.json"
+export OPENCLAW_CONFIG_PATH="$work/openclaw.json"
+unset OPENCLAW_CONFIG_READONLY
+
+# "<trust reason> <installed version> <where>" of a plugin, from the product.
+# <where> is "state" when the code is in the state directory.
+state() {
+  # shellcheck disable=SC2016 # the ${...} is JavaScript.
+  node /app/openclaw.mjs plugins inspect "$1" --json 2>/dev/null | node -e '
+    let s = "";
+    process.stdin.on("data", d => (s += d)).on("end", () => {
+      try {
+        const j = JSON.parse(s.slice(s.indexOf("{")));
+        const root = `${process.env.OPENCLAW_STATE_DIR}/`;
+        const where = (j.install?.installPath ?? "").startsWith(root) ? "state" : "other";
+        console.log(`${j.plugin?.trust?.reason ?? "none"} ${j.install?.version ?? "none"} ${where}`);
+      } catch {
+        console.log("none none none");
+      }
+    });' || echo "none none none"
+}
+
+sed -e 's/#.*//' "$list" | while read -r id package; do
+  [ -n "$id" ] || continue
+  if [ "$(state "$id")" = "trusted-official $version state" ]; then
+    echo "official-plugins id=$id version=$version result=current"
+    continue
+  fi
+  # --force replaces an install of another release.
+  if ! node /app/openclaw.mjs plugins install "$package@$version" --pin --no-enable --force; then
+    echo "official-plugins id=$id version=$version result=failed"
+    exit 1
+  fi
+  if [ "$(state "$id")" != "trusted-official $version state" ]; then
+    echo "official-plugins id=$id version=$version result=failed ($(state "$id"))"
+    exit 1
+  fi
+  echo "official-plugins id=$id version=$version result=installed"
+done

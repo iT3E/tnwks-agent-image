@@ -4,7 +4,12 @@ first, on a workstation and in CI.
 - The user, the entrypoint and the command of the image contract.
 - The OpenShell CLI is the release of the anchor stage of the Dockerfile.
 - Each plugin of plugins.txt is installed at the release of the product.
+- The npm cache holds each package of official-plugins.txt at the release of
+  the product.
 - The image holds nothing of a trust domain: no config, no state, no archive.
+- The official plugins step installs each plugin of official-plugins.txt
+  with no network, as a verified official install, and a second run changes
+  nothing.
 - The gateway starts with a read-only root and a read-only config, and loads
   the plugins. The doctor step of the product works on a copy of the config.
 - A web search goes to the search endpoint of the config with the key from
@@ -36,6 +41,17 @@ def plugin_names():
         if line:
             names.append(line)
     return names
+
+
+def official_plugins():
+    """The lines of official-plugins.txt, as {plugin id: npm package}."""
+    plugins = {}
+    for line in (REPO / "official-plugins.txt").read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            plugin_id, package = line.split()
+            plugins[plugin_id] = package
+    return plugins
 
 
 def ready_check():
@@ -84,6 +100,21 @@ class ImageContract(unittest.TestCase):
             self.assertEqual(
                 version, out["product"], f"{name} is not at the release of the product"
             )
+
+    def test_official_plugins_in_the_npm_cache(self):
+        version = in_image(
+            "-e",
+            "console.log(require('/app/package.json').version)",
+            entrypoint="node",
+        ).stdout.strip()
+        keys = in_image(
+            "-c", "cat /opt/openclaw/npm-cache/_cacache/index-v5/*/*/*"
+        ).stdout
+        self.assertTrue(official_plugins(), "official-plugins.txt names no plugin")
+        for package in official_plugins().values():
+            # The key of the tarball of the package in the cache of npm.
+            tarball = f"{package}/-/{package.rsplit('/', 1)[-1]}-{version}.tgz"
+            self.assertIn(tarball, keys, package)
 
     def test_nothing_of_a_trust_domain(self):
         # No file in the state, archive and config paths of the user, and no
@@ -141,6 +172,22 @@ class GatewayStarts(unittest.TestCase):
         ]
         for key, value in TEST_ENV.items():
             base += ["-e", f"{key}={value}"]
+
+        # The first init container of the product steps: the official plugins
+        # step, with no network (the base has none). Twice: the second run
+        # finds each plugin current.
+        cls.official = [
+            docker(
+                "run",
+                "--rm",
+                *base,
+                IMAGE_REF,
+                "install-official-plugins",
+                check=False,
+                timeout=300,
+            )
+            for _ in range(2)
+        ]
 
         # The init container of the pod: the doctor step of the product, on a
         # copy of the config, because the config is read only.
@@ -200,6 +247,40 @@ class GatewayStarts(unittest.TestCase):
         self.assertEqual(
             plugins["openshell"]["version"], plugins["diagnostics-otel"]["version"]
         )
+
+    def test_official_plugins_step(self):
+        first, second = self.official
+        for result in self.official:
+            self.assertEqual(
+                result.returncode, 0, result.stdout[-2000:] + result.stderr[-2000:]
+            )
+        for plugin_id in official_plugins():
+            self.assertRegex(first.stdout, rf"id={plugin_id} .*result=installed")
+            self.assertRegex(second.stdout, rf"id={plugin_id} .*result=current")
+
+    def test_official_plugins_are_verified_official_installs(self):
+        # A sandboxed session uses a web search provider only when it is
+        # bundled or a verified official install. A plugin from
+        # plugins.load.paths is neither.
+        self.assertTrue(self.ready, "the gateway did not get ready")
+        for plugin_id, package in official_plugins().items():
+            out = docker(
+                "exec",
+                self.name,
+                "node",
+                "/app/openclaw.mjs",
+                "plugins",
+                "inspect",
+                plugin_id,
+                "--json",
+            ).stdout
+            info = json.loads(out[out.index("{") :])
+            self.assertEqual(info["plugin"]["status"], "loaded", plugin_id)
+            self.assertEqual(info["plugin"]["origin"], "global", plugin_id)
+            self.assertIs(info["plugin"]["trustedOfficialInstall"], True, plugin_id)
+            self.assertEqual(info["plugin"]["trust"]["reason"], "trusted-official")
+            self.assertEqual(info["install"]["source"], "npm")
+            self.assertEqual(info["install"]["resolvedName"], package)
 
     def test_config_env_reference(self):
         # A string of the config can name an environment variable. The ops
