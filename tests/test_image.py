@@ -13,6 +13,10 @@ first, on a workstation and in CI.
   for an install record of another plugin or a file in <state>/extensions.
 - The gateway starts with a read-only root and a read-only config, and loads
   the plugins. The doctor step of the product works on a copy of the config.
+- With plugins.allow in the config, a plugin that the state directory holds
+  and the list does not name runs neither in doctor nor in the gateway: a
+  plugin in <state>/extensions, and one with an install record. A plugin in
+  <state>/extensions with the id of a bundled plugin does not take its place.
 - A web search goes to the search endpoint of the config with the key from
   the env, and its result comes back. The endpoint is a fake one in the
   container: the test calls no search vendor.
@@ -20,6 +24,7 @@ first, on a workstation and in CI.
 
 import hashlib
 import json
+import re
 import time
 import unittest
 import uuid
@@ -53,6 +58,52 @@ def official_plugins():
             plugin_id, package = line.split()
             plugins[plugin_id] = package
     return plugins
+
+
+# The plugins that the test puts in the state directory after the official
+# plugins step, as a process that can write the state could. Each one writes
+# a line to <state>/plugin-ran.log when it is imported and registered.
+STATE_PLUGINS = {
+    "extensions/extra-file": "extra-file",
+    "extensions/memory-core": "memory-core",
+}
+RECORD_PLUGIN = "extra-record"
+
+
+def plant_plugin(directory, plugin_id):
+    """Shell lines that write a test plugin to a directory."""
+    package = json.dumps(
+        {
+            "name": f"test-{plugin_id}",
+            "version": "1.0.0",
+            "type": "module",
+            "openclaw": {"extensions": ["./index.js"]},
+        }
+    )
+    manifest = json.dumps(
+        {
+            "id": plugin_id,
+            "name": "Test",
+            "description": "test",
+            "activation": {"onStartup": True},
+            "configSchema": {"type": "object", "properties": {}},
+        }
+    )
+    index = (
+        'import fs from "node:fs";\n'
+        "const mark = (what) => fs.appendFileSync("
+        '(process.env.OPENCLAW_STATE_DIR ?? "/home/node/.openclaw") + "/plugin-ran.log", '
+        f'"{plugin_id} " + what + "\\n");\n'
+        'mark("imported");\n'
+        f'export default {{ id: "{plugin_id}", name: "Test", description: "test", '
+        'register() { mark("registered"); } };\n'
+    )
+    return (
+        f"mkdir -p {directory}\n"
+        f"cat > {directory}/package.json <<'JSON'\n{package}\nJSON\n"
+        f"cat > {directory}/openclaw.plugin.json <<'JSON'\n{manifest}\nJSON\n"
+        f"cat > {directory}/index.js <<'JS'\n{index}JS\n"
+    )
 
 
 def ready_check():
@@ -190,6 +241,27 @@ class GatewayStarts(unittest.TestCase):
             for _ in range(2)
         ]
 
+        # Plugins that the image did not put in the state: two in
+        # <state>/extensions, and one installed from a path, with an install
+        # record. The official plugins step would stop a later start for
+        # them; the allow list of the config must keep them out on its own.
+        plant = "set -e\n"
+        for directory, plugin_id in STATE_PLUGINS.items():
+            plant += plant_plugin(f"/home/node/.openclaw/{directory}", plugin_id)
+        plant += plant_plugin(f"/tmp/{RECORD_PLUGIN}", RECORD_PLUGIN)
+        plant += (
+            "cp /home/node/.openclaw/openclaw.json /tmp/config-copy.json\n"
+            # With no OPENCLAW_STATE_DIR, the product would take the directory
+            # of the config copy as the state directory.
+            "OPENCLAW_STATE_DIR=/home/node/.openclaw "
+            "OPENCLAW_CONFIG_PATH=/tmp/config-copy.json node /app/openclaw.mjs "
+            f"plugins install /tmp/{RECORD_PLUGIN} --force --no-enable --accept-capabilities\n"
+            "rm -f /home/node/.openclaw/plugin-ran.log\n"
+        )
+        cls.plant = docker(
+            "run", "--rm", *base, IMAGE_REF, "sh", "-c", plant, check=False, timeout=300
+        )
+
         # The init container of the pod: the doctor step of the product, on a
         # copy of the config, because the config is read only.
         cls.doctor = docker(
@@ -248,6 +320,51 @@ class GatewayStarts(unittest.TestCase):
         self.assertEqual(
             plugins["openshell"]["version"], plugins["diagnostics-otel"]["version"]
         )
+
+    def test_only_the_allowed_plugins_load(self):
+        self.assertTrue(self.ready, "the gateway did not get ready")
+        allow = set(json.loads(CONFIG.read_text())["plugins"]["allow"])
+        logs = docker("logs", self.name, check=False)
+        logs = logs.stdout + logs.stderr
+        line = re.search(r"http server listening \(\d+ plugins: ([^;)]*)", logs)
+        self.assertIsNotNone(line, logs[-2000:])
+        started = set(line.group(1).split(", "))
+        # The gateway starts a channel plugin only with its channel in the
+        # config, and the test config has none.
+        self.assertLessEqual(started, allow)
+        self.assertEqual(allow - started, {"signal"})
+
+    def test_state_plugins_do_not_run(self):
+        self.assertEqual(
+            self.plant.returncode,
+            0,
+            self.plant.stdout[-2000:] + self.plant.stderr[-2000:],
+        )
+        self.assertTrue(self.ready, "the gateway did not get ready")
+        out = docker(
+            "exec", self.name, "node", "/app/openclaw.mjs", "plugins", "list", "--json"
+        ).stdout
+        plugins = {}
+        for plugin in json.loads(out[out.index("{") :])["plugins"]:
+            plugins.setdefault(plugin["id"], []).append(plugin)
+        for plugin_id in ("extra-file", RECORD_PLUGIN):
+            self.assertIn(plugin_id, plugins)
+            for plugin in plugins[plugin_id]:
+                self.assertEqual(plugin["status"], "disabled", plugin)
+        # The bundled memory-core, not the one of the same id in the state.
+        loaded = [p for p in plugins["memory-core"] if p["status"] == "loaded"]
+        self.assertEqual(
+            [p["origin"] for p in loaded], ["bundled"], plugins["memory-core"]
+        )
+        ran = docker(
+            "exec",
+            self.name,
+            "sh",
+            "-c",
+            "cat /home/node/.openclaw/plugin-ran.log 2>/dev/null",
+            check=False,
+        ).stdout
+        self.assertEqual(ran, "", "a plugin of the state ran")
 
     def test_official_plugins_step(self):
         first, second = self.official

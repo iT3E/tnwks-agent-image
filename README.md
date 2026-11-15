@@ -183,7 +183,11 @@ failed test means no image.
    the official plugins step installs each one with no network, as a
    verified official install, again at each run; it replaces changed code
    and a changed install record, and it stops the start for an install
-   record of another plugin or a file in `<state>/extensions`; the gateway
+   record of another plugin or a file in `<state>/extensions`; with
+   `plugins.allow` in the config, a plugin in `<state>/extensions` or with
+   an install record that the list does not name runs neither in doctor nor
+   in the gateway, and one with the id of a bundled plugin in
+   `<state>/extensions` does not take its place; the gateway
    starts with a read-only root,
    no capability and a read-only config, and loads the plugins; a `${NAME}`
    in the config takes the value of the env var; the config does not
