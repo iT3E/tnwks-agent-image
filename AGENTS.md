@@ -53,6 +53,8 @@ it as the agent pod of each trust domain, pinned by `:<version>@sha256`.
   tnwks-ops PR moves that pin.
 - Checks: `build.yaml` (compileall, the Docker build and its tests), `privacy`, `betterleaks`, `changelog`,
   `actionlint` (workflow changes only), and the labeler. Locally: `task test`.
+  `image-age.yaml` runs `bin/image-age` each day: it fails when a newer
+  stable OpenClaw release is more than 14 days old (README).
 - The workflows are thin callers of the reusable workflows in
   iT3E/github-workflows, pinned by the template, and the files listed in
   app-repo-template's README are managed by Copier. Change them there; a
