@@ -16,7 +16,7 @@ FROM ghcr.io/openclaw/openclaw:2026.11.3@sha256:e73f689d663567f0fe3c5a85c54beb3e
 # the trusted runtime of a sandbox, and its binary reports the release. The
 # CLI below comes from the same release, and the test cluster of CI runs the
 # chart of the same release. So one Renovate update moves all three.
-FROM ghcr.io/nvidia/openshell/sandbox:0.1.7@sha256:89819c03f291d9b909c3fc2962360e24af4516627422d18f3e681829f003f347 AS openshell-release
+FROM ghcr.io/nvidia/openshell/sandbox:0.1.8@sha256:f0fe7dbf18d833acb5da99c405231124718f23b524aa8e3c0108e6f37530033b AS openshell-release
 
 # ---- the OpenShell CLI ----
 # The OpenClaw plugin calls the CLI to make a sandbox and to reach it over SSH.
