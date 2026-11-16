@@ -20,4 +20,4 @@ FROM registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.10@sha256:594f4
 FROM otel/opentelemetry-collector:0.139.0@sha256:8ac5df2a931e9264667b236d65bf7591fa4ba633a7a634e6caa2f0a4fc549c07 AS collector
 
 # The image of each sandbox of the test, and of the mock model server.
-FROM docker.io/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS python
+FROM docker.io/library/python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS python
