@@ -145,6 +145,19 @@ class ImageContract(unittest.TestCase):
         self.assertEqual(out[2], version)
         self.assertRegex(out[3], r"^[0-9a-f]{64}$")
 
+    def test_host_approval_plugin_is_read_only_and_has_no_tests(self):
+        out = in_image(
+            "-c",
+            "cd /opt/openclaw/local-plugins/host-approval && "
+            "find . -mindepth 1 | sort; "
+            "find /opt/openclaw/local-plugins ! -user root -o -perm /022 | wc -l; "
+            "test -w index.js && echo writable || echo read-only",
+        ).stdout.split()
+        self.assertEqual(
+            out[:4], ["./index.js", "./lib.js", "./openclaw.plugin.json", "./package.json"]
+        )
+        self.assertEqual(out[4:], ["0", "read-only"])
+
     def test_plugins_at_the_product_release(self):
         script = (
             "const fs = require('fs');"

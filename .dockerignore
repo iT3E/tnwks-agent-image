@@ -3,3 +3,6 @@
 !plugins.txt
 !official-plugins.txt
 !image/install-official-plugins
+!plugins/host-approval/*.js
+!plugins/host-approval/*.json
+!plugins/host-approval/test/*.test.js

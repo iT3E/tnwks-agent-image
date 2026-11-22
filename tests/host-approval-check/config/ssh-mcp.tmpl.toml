@@ -1,0 +1,24 @@
+# The host server config of the lab: one profile for the normal user of the
+# agent on the fake host. Its own approval is off (auto), because the plugin
+# of the product is the gate (Design Doc, section 4.2.6).
+[defaults]
+defaultProfile = "agent"
+approvalMode = "auto"
+commandTimeoutMs = 30000
+
+[[profiles]]
+name = "agent"
+host = "labhost"
+port = 22
+user = "agent"
+auth = "key"
+keyRef = "/keys/agent_ed25519"
+trustedHostKey = "@HOST_KEY_FP@"
+role = "operator"
+group = "staging"
+approvalPolicy = "auto"
+announceAgent = false
+
+[policy]
+# The readers that can send data out of the host, and that no line needs.
+denylist = ["^\\s*dig\\b", "^\\s*nslookup\\b", "^\\s*host\\b", "^\\s*ping\\b", "^\\s*traceroute\\b"]

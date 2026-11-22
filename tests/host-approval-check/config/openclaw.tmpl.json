@@ -1,0 +1,205 @@
+{
+ "gateway": {
+  "mode": "local",
+  "bind": "loopback",
+  "port": 18789,
+  "auth": {
+   "mode": "token"
+  },
+  "controlUi": {
+   "enabled": false
+  }
+ },
+ "update": {
+  "checkOnStart": false
+ },
+ "telemetry": {
+  "enabled": false
+ },
+ "acp": {
+  "enabled": false
+ },
+ "commands": {
+  "config": false,
+  "ownerAllowFrom": [
+   "telegram:1000001"
+  ],
+  "allowFrom": {"telegram": ["1000001", "1000002"], "*": []}
+ },
+ "session": {
+  "dmScope": "per-channel-peer"
+ },
+ "approvals": {
+  "plugin": {
+   "enabled": true,
+   "mode": "targets",
+   "targets": [
+    {
+     "channel": "telegram",
+     "to": "1000001"
+    }
+   ]
+  }
+ },
+ "tools": {
+  "elevated": {
+   "enabled": false
+  },
+  "deny": [
+   "code_execution",
+   "file_fetch",
+   "file_write",
+   "dir_list",
+   "dir_fetch",
+   "gateway",
+   "github_publish",
+   "openclaw",
+   "plugins",
+   "terminal",
+   "portal"
+  ],
+  "sandbox": {
+   "tools": {
+    "alsoAllow": [
+     "memory_search",
+     "memory_get",
+     "web_search",
+     "web_fetch",
+     "message",
+     "progress_card",
+     "host__read-command",
+     "host__run-command",
+     "host__privileged-command",
+     "host__signal-process",
+     "host__sftp-list",
+     "host__sftp-download",
+     "host__sftp-upload",
+     "host__open-session",
+     "host__read-session-output",
+     "host__close-session",
+     "host__list-sessions",
+     "host__list-connections"
+    ]
+   }
+  },
+  "sessions": {
+   "visibility": "all"
+  }
+ },
+ "agents": {
+  "defaults": {
+   "workspace": "/home/node/data/state/workspace",
+   "model": {
+    "primary": "litellm/agents-main"
+   },
+   "modelPolicy": {
+    "allow": [
+     "litellm/agents-main"
+    ]
+   },
+   "sandbox": {
+    "mode": "all",
+    "backend": "openshell",
+    "scope": "session",
+    "workspaceAccess": "rw",
+    "sessionToolsVisibility": "all"
+   }
+  }
+ },
+ "models": {
+  "mode": "replace",
+  "catalogRefresh": {
+   "enabled": false
+  },
+  "providers": {
+   "litellm": {
+    "baseUrl": "http://fakemodel:4000",
+    "apiKey": {
+     "source": "env",
+     "provider": "default",
+     "id": "LITELLM_API_KEY"
+    },
+    "api": "anthropic-messages",
+    "models": [
+     {
+      "id": "agents-main",
+      "name": "Lab fake model",
+      "reasoning": false,
+      "input": [
+       "text"
+      ],
+      "cost": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0
+      },
+      "contextWindow": 200000,
+      "maxTokens": 4000
+     }
+    ]
+   }
+  }
+ },
+ "channels": {
+  "telegram": {
+   "enabled": true,
+   "apiRoot": "http://fakechat:8081",
+   "dmPolicy": "allowlist",
+   "allowFrom": [
+    "1000001",
+    "1000002"
+   ],
+   "groupPolicy": "disabled",
+   "historyLimit": 15,
+   "streaming": {
+    "mode": "off"
+   },
+   "configWrites": false,
+   "execApprovals": {
+    "enabled": true,
+    "approvers": [
+     "1000001"
+    ]
+   }
+  }
+ },
+ "plugins": {
+  "allow": @PLUGINS_ALLOW@,
+  "load": {
+   "paths": @LOAD_PATHS@
+  },
+  "entries": {
+   "host-approval": {
+    "enabled": true,
+    "config": {
+     "serverPrefixes": [
+      "host__"
+     ],
+     "readProfile": "agent",
+     "readList": [
+      "uptime",
+      "cat /etc/lab-motd",
+      "id"
+     ],
+     "promptTools": [],
+     "approverId": "1000001",
+     "approvalChannel": "telegram",
+     "timeoutMs": @TIMEOUT_MS@,
+     "mcpUrl": "http://agw:3000/main-host/mcp",
+     "mcpKeyEnv": "MCP_KEY"
+    }
+   },
+   "openshell": {
+    "enabled": true,
+    "config": {
+     "mode": "mirror",
+     "from": "docker.io/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90",
+     "gatewayEndpoint": "https://openshell-lab-absent:8080",
+     "autoProviders": false,
+     "timeoutSeconds": 300
+    }
+   }
+  }
+ }
+}
