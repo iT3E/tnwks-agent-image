@@ -167,10 +167,8 @@ starts the image with fakes of the chat API, the model and an IRC server,
 the central MCP gateway, the host server and a fake Linux host, and runs
 the rows of the plugin on one internal network with no route out. The
 second channel is the IRC plugin of the product with the fake server.
-`bin/image-test` runs it in CI under the Build check. It is switched off
-(`host_approval_check=off`) until the host server has a release: to switch
-it on, add the `host-mcp` stage to `.github/test-cluster/Dockerfile` and
-set `host_approval_check=on`, in one pull request.
+`bin/image-test` runs it in CI under the Build check, and on a workstation
+with `IMAGE_TEST_HOST_APPROVAL=1`. It takes about 5 minutes.
 
 ## The pins and their updates
 
@@ -183,7 +181,7 @@ repository.
 | OpenShell | `Dockerfile`, the `openshell-release` stage | Renovate, tag and digest. The CLI in the image, and the chart and images of the test cluster, follow it |
 | The images of the test cluster | [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. A change there makes no release |
 | kind, helm, kubectl | [`tests/kind/up.sh`](tests/kind/up.sh), a version and a sha256 each | By hand, from the checksum file of each release. Renovate does not read files under `tests/` |
-| The images of the update check of the host approval plugin | The `mcp-gateway`, `sshd-base` and `host-mcp` stages of [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. The `host-mcp` stage is not there yet ("The host approval plugin") |
+| The images of the update check of the host approval plugin | The `mcp-gateway`, `sshd-base` and `host-mcp` stages of [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. `host-mcp` is the released image of tnwks-host-mcp |
 
 ## The image age check
 

@@ -37,7 +37,14 @@ for v in "$AGW_IMAGE" "$PY_IMAGE" "$SSHD_BASE" "$SSH_MCP_IMAGE"; do
 done
 
 export UC_WORK="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/host-approval-check.XXXXXX")"
-trap 'rm -rf "$UC_WORK"' EXIT
+# Containers leave files of root in the work folder: they go back to the
+# caller first, so the clean up works for any uid.
+cleanup() {
+  docker run --rm --network none -v "$UC_WORK:/w" --entrypoint chown "$PY_IMAGE" -R "$(id -u):$(id -g)" /w \
+    >/dev/null 2>&1 || true
+  rm -rf "$UC_WORK"
+}
+trap cleanup EXIT
 export SSHD_IMAGE="host-approval-check-sshd:$(basename "$UC_WORK" | tr 'A-Z.' 'a-z-')"
 docker build -q --build-arg "BASE=$SSHD_BASE" -t "$SSHD_IMAGE" "$HERE/sshd" >/dev/null
 for i in "$AGW_IMAGE" "$PY_IMAGE" "$SSH_MCP_IMAGE"; do
@@ -45,9 +52,11 @@ for i in "$AGW_IMAGE" "$PY_IMAGE" "$SSH_MCP_IMAGE"; do
 done
 
 # The IRC plugin at the release of the product, unpacked for a read-only mount.
+# The product loads a plugin only from files of its own uid or of root, and
+# the uid of a CI runner is neither, so the files go to root.
 mkdir -p "$UC_WORK/irc"
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$UC_WORK/irc:/out" --entrypoint sh "$AGENT_IMAGE" -c \
-  'cd /out && npm pack --silent "@openclaw/irc@$(node -p "require(\"/app/package.json\").version")" >/dev/null && tar -xzf openclaw-irc-*.tgz && rm openclaw-irc-*.tgz'
+docker run --rm --user 0:0 -e HOME=/tmp -v "$UC_WORK/irc:/out" --entrypoint sh "$AGENT_IMAGE" -c \
+  'cd /out && npm pack --silent "@openclaw/irc@$(node -p "require(\"/app/package.json\").version")" >/dev/null && tar -xzf openclaw-irc-*.tgz && rm openclaw-irc-*.tgz && chown -R 0:0 package'
 export IRC_PLUGIN_DIR="$UC_WORK/irc/package"
 test -f "$IRC_PLUGIN_DIR/package.json"
 

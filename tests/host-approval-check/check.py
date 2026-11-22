@@ -15,10 +15,12 @@ no kubeconfig, no gh. The runner needs Docker and Python 3.
   python3 -I check.py            (the images come from the env, see run.sh)
 """
 
+import base64
 import hashlib
 import html
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -84,10 +86,13 @@ def record(row, ok, detail, untested=False):
 def make_secrets(work):
     keys = os.path.join(work, "keys")
     os.makedirs(keys, mode=0o755)
-    for k in ("agent", "host"):
-        sh("docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
-           "-v", f"{keys}:/k", "--entrypoint", "ssh-keygen", SSHD_IMAGE,
-           "-q", "-t", "ed25519", "-N", "", "-C", "lab", "-f", f"/k/{k}")
+    # ssh-keygen needs an account entry for its uid, and the uid of a CI
+    # runner has none in the image: it runs as root there, and the files
+    # then go to the caller.
+    owner = f"{os.getuid()}:{os.getgid()}"
+    sh("docker", "run", "--rm", "--network", "none", "-v", f"{keys}:/k", "--entrypoint", "sh", SSHD_IMAGE, "-c",
+       'for k in agent host; do ssh-keygen -q -t ed25519 -N "" -C lab -f "/k/$k" || exit 1; done; chown "$0" /k/*',
+       owner)
     # The host server runs as the user of the runner and reads its key and
     # config only at mode 0600. The fake host runs as root.
     for f in os.listdir(keys):
@@ -96,6 +101,14 @@ def make_secrets(work):
             SSHD_IMAGE, "-l", "-E", "sha256", "-f", "/k/host.pub").split()[1]
     return {"MCP_KEY": secrets.token_hex(32), "SSH_MCP_TOKEN": secrets.token_hex(32),
             "GW_TOKEN": secrets.token_hex(32), "HOST_FP": fp, "keys": keys}
+
+
+def root_copy(work, src, dest):
+    """A copy of a plugin folder of the checkout, owned by root: the product
+    loads a plugin only from files of its own uid or of root, and the uid of
+    a CI runner is neither."""
+    sh("docker", "run", "--rm", "--network", "none", "-v", f"{src}:/src:ro", "-v", f"{work}:/w", PY_IMAGE,
+       "sh", "-c", f'cp -R /src "/w/{dest}" && chown -R 0:0 "/w/{dest}"')
 
 
 def render(work, s, product_change=None):
@@ -180,8 +193,8 @@ def start_agent(work, s):
         mounts += ["-v", f"{PLUGIN_DIR}:/lab/plugin:ro"]
     if OPENSHELL_DIR:
         mounts += ["-v", f"{OPENSHELL_DIR}:/lab/openshell:ro"]
-    if os.path.isdir(os.path.join(HERE, "broken")):
-        mounts += ["-v", f"{os.path.join(HERE, 'broken')}:/lab/broken:ro"]
+    if os.path.isdir(os.path.join(work, "broken")):
+        mounts += ["-v", f"{os.path.join(work, 'broken')}:/lab/broken:ro"]
     sh("docker", "run", "-d", "--name", name("agent"), "--network", NET, "--network-alias", "agent",
        "--read-only", "--tmpfs", "/tmp:uid=1000,gid=1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
        "-v", f"{vol}:/home/node/data", "-v", f"{work}/openclaw.json:/home/node/config/openclaw.json:ro", *mounts,
@@ -501,13 +514,21 @@ def rows_base(work):
     else:
         record("the second channel can not answer a card", False, "no card")
 
-    # 7. A scheduled turn and a heartbeat: no host tool.
+    # 7. A scheduled turn and a heartbeat: no host tool. The scheduled turn
+    # runs in the session of the approver's direct chat, so it is a turn in
+    # his direct chat that no message of his starts.
     a0 = len(audit())
     n = nonce()
     msg = call_text(n, "host__read-command", {"profile": "agent", "command": "uptime"})
+    out = sh("docker", "exec", name("agent"), "openclaw", "sessions", "list", "--json", check=False)
+    try:
+        keys = [x.get("key") or "" for x in json.loads(out[out.index("{"):]).get("sessions", [])]
+    except (ValueError, AttributeError):
+        keys = []
+    dm_key = next((k for k in keys if k.endswith(f":telegram:direct:{APPROVER}")), None)
     out = sh("docker", "exec", name("agent"), "openclaw", "cron", "add", "--name", "uc-sched", "--every", "1h",
-             "--agent", "main", "--message", msg, "--channel", "telegram", "--to", APPROVER, "--announce",
-             "--json", check=False)
+             "--agent", "main", "--message", msg, "--session", f"session:{dm_key}", "--channel", "telegram",
+             "--to", APPROVER, "--announce", "--json", check=False) if dm_key else "{}"
     try:
         job = json.loads(out[out.index("{"):])
         job_id = job.get("id") or job.get("job", {}).get("id")
@@ -519,11 +540,20 @@ def rows_base(work):
     if job_id:
         sh("docker", "exec", name("agent"), "openclaw", "cron", "run", job_id, check=False)
         res = wait(lambda: result_of(work, n), 90)
-        record("a scheduled turn gets no host tool", bool(res) and "Unknown tool id: host__" in res and
-               not audit_has("uptime", a0), f"result {str(res)[:90]!r}")
+
+        def run_session():
+            out = sh("docker", "exec", name("agent"), "openclaw", "cron", "runs", job_id, "--json", check=False)
+            found = re.findall(r'"sessionKey":\s*"([^"]+)"', out)
+            return found[-1] if found else None
+        ran_in = wait(run_session, 20)
+        in_dm = ran_in is not None and ran_in == dm_key
+        record("a scheduled turn in the approver's direct chat gets no host tool",
+               bool(res) and "Unknown tool id: host__" in res and not audit_has("uptime", a0) and in_dm,
+               f"session of the turn: the approver's direct chat {in_dm}, result {str(res)[:90]!r}")
         sh("docker", "exec", name("agent"), "openclaw", "cron", "rm", job_id, check=False)
     else:
-        record("a scheduled turn gets no host tool", False, "could not add the job", untested=True)
+        record("a scheduled turn in the approver's direct chat gets no host tool", False,
+               f"could not add the job (direct chat session found: {dm_key is not None})", untested=True)
 
     a0 = len(audit())
     n = nonce()
@@ -578,10 +608,14 @@ def rows_variants(work, s):
         c["plugins"]["load"]["paths"] = [p if p != PLUGIN_PATH else "/lab/broken" for p in c["plugins"]["load"]["paths"]]
 
     for label, change in (("off", disabled), ("not-allowed", not_allowed), ("absent", no_path), ("broken", broken)):
-        if label == "broken" and not os.path.isdir(os.path.join(HERE, "broken")):
+        if label == "broken" and not os.path.isdir(os.path.join(work, "broken")):
             record("plugin broken: no host tool", False, "no broken copy", untested=True)
             continue
         log, results, ran = rows_variant(work, s, label, change, False)
+        if "suspicious ownership" in log:
+            record(f"plugin {label}: no host call runs with no card", False,
+                   "the product blocked a plugin for its owner, not for the change")
+            continue
         loaded = "host-approval: loaded" in log
         write_ran = any(a.get("command") == f"touch /tmp/uc-{label}" for a in ran)
         if loaded:
@@ -627,6 +661,39 @@ def rows_variants(work, s):
     res = wait(lambda: result_of(work, n), 60)
     record("a second server entry with the plugin off and no alsoAllow line: the sandbox hides its tools",
            bool(res) and "Unknown tool id" in res and not audit()[a0:], f"result {str(res)[:90]!r}")
+
+    # Task 6.22: the check of the server entries matches by the resolved
+    # route. A second entry reaches the host route by another name of the
+    # gateway (its container name, which resolves to the same address) with
+    # a percent-encoded path; another entry carries the key in another form
+    # (basic auth). Each time the plugin refuses each call at start.
+    def entry_rows(label, entry, want):
+        def change(c):
+            c.setdefault("mcp", {}).setdefault("servers", {})["hostc"] = entry
+            c["tools"]["sandbox"]["tools"]["alsoAllow"] += ["hostc__" + t for t in ALL_HOST_TOOLS]
+        log, results, ran = rows_variant(work, s, label, change, False)
+        refused = f"mcp.servers.hostc {want}" in log and "refusing each tool call" in log
+        n = nonce()
+        a0 = len(audit())
+        chat_msg(APPROVER, call_text(n, "hostc__read-command", {"profile": "agent", "command": "uptime"}))
+        res = wait(lambda: result_of(work, n), 60)
+        return refused, ran, audit()[a0:], res
+
+    basic = base64.b64encode(f"lab:{s['MCP_KEY']}".encode()).decode()
+    for label, row, entry, want in (
+        ("other-name", "a second server entry by another name of the gateway and an encoded path: the plugin refuses each call",
+         {"url": f"http://{name('agw')}:3000/main%2Dhost/mcp", "transport": "streamable-http"},
+         "points at the route of the host server"),
+        ("other-host", "a second server entry on another host and port with the host route as its path: the plugin refuses each call",
+         {"url": "http://fakechat:8081/main-host/mcp", "transport": "streamable-http"},
+         "points at the route of the host server"),
+        ("other-key", "a second server entry with another form of the key: the plugin refuses each call",
+         {"url": "http://agw:3000/main-other/mcp", "transport": "streamable-http",
+          "headers": {"Authorization": f"Basic {basic}"}}, "carries the key of the host server"),
+    ):
+        refused, ran, ran_after, res = entry_rows(label, entry, want)
+        record(row, refused and not ran and not ran_after,
+               f"start refusal {refused}, audit {len(ran) + len(ran_after)}, result {str(res)[:60]!r}")
 
 
 def rows_group_commands(work, s):
@@ -675,6 +742,47 @@ def rows_group_commands(work, s):
            f"after the approver {after}, result {str(res)[:80]!r}")
 
 
+def rows_card_while_others_write(work, s):
+    """The safety property of a card while other senders write: nothing
+    runs before the approver's yes; after it, the call runs, or the result
+    is an error and the server audit shows no run. The detail records
+    which. A known limit of the product at this release is recorded in the
+    runbook; the approval then fails closed."""
+    row = "a card while other senders write: nothing runs before the yes; after it the call runs or fails closed"
+    render(work, s)
+    start_agent(work, s)
+    a0 = len(audit())
+    n, card = owner_card(work, "touch /tmp/uc-others-write", "others-write")
+    if not card:
+        record(row, False, "no card")
+        return
+    chat_msg(MEMBER, "/status")
+    chat_msg(MEMBER, "/status", GROUP)
+    time.sleep(12)
+    before = bool(audit_has("touch /tmp/uc-others-write", a0))
+    decide_card(card, APPROVER, "allow-once")
+    res = wait(lambda: result_of(work, n), 60)
+    ran = bool(wait(lambda: audit_has("touch /tmp/uc-others-write", a0), 15))
+    failed_closed = bool(res) and '"status": "error"' in res and not ran
+    outcome = "the call ran after the yes" if ran else ("it failed closed" if failed_closed else "no result")
+    record(row, not before and (ran or failed_closed), f"ran before the yes {before}; {outcome}")
+
+
+# The rows of a full run. In CI each must run: a skip flag, fewer rows, or
+# a row that could not be tested (but the heartbeat row, which a release
+# with no heartbeat can not test) fails the check.
+EXPECTED_ROWS = 32
+SKIP_FLAGS = ("UC_ONLY_VARIANTS", "UC_SKIP_VARIANTS", "UC_SKIP_GROUP_COMMANDS", "UC_SKIP_OTHERS_WRITE")
+
+
+def check_complete():
+    flags = [f for f in SKIP_FLAGS if ENV.get(f)]
+    untested = [r for r, st, _ in RESULTS if st == "could not be tested" and not r.startswith("a heartbeat")]
+    count = len(RESULTS)
+    record("the check ran in full (CI)", not flags and count >= EXPECTED_ROWS and not untested,
+           f"rows {count} of {EXPECTED_ROWS}, skip flags {flags}, not tested {untested}")
+
+
 def main():
     base = ENV.get("UC_WORK") or tempfile.gettempdir()
     work = tempfile.mkdtemp(prefix=RUN + "-", dir=base)
@@ -683,6 +791,8 @@ def main():
     s = None
     try:
         s = make_secrets(work)
+        if os.path.isdir(os.path.join(HERE, "broken")):
+            root_copy(work, os.path.join(HERE, "broken"), "broken")
         render(work, s)
         up(work, s)
         version = sh("docker", "exec", name("agent"), "openclaw", "--version", check=False).strip()
@@ -693,6 +803,8 @@ def main():
             rows_variants(work, s)
         if ENV.get("UC_SKIP_GROUP_COMMANDS") != "1":
             rows_group_commands(work, s)
+        if ENV.get("UC_SKIP_OTHERS_WRITE") != "1":
+            rows_card_while_others_write(work, s)
     except Exception as err:  # a fault of the check itself is a failure
         record("the check ran to the end", False, repr(err)[:400])
     finally:
@@ -700,6 +812,8 @@ def main():
             print(f"kept: {RUN}, {work}")
         else:
             down(work)
+    if ENV.get("CI") == "true":
+        check_complete()
     took = int(time.time() - t0)
     print(f"\n| Row | Result | Detail |\n| --- | --- | --- |")
     for row, state, detail in RESULTS:
