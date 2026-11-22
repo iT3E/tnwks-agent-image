@@ -86,10 +86,13 @@ def record(row, ok, detail, untested=False):
 def make_secrets(work):
     keys = os.path.join(work, "keys")
     os.makedirs(keys, mode=0o755)
-    for k in ("agent", "host"):
-        sh("docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
-           "-v", f"{keys}:/k", "--entrypoint", "ssh-keygen", SSHD_IMAGE,
-           "-q", "-t", "ed25519", "-N", "", "-C", "lab", "-f", f"/k/{k}")
+    # ssh-keygen needs an account entry for its uid, and the uid of a CI
+    # runner has none in the image: it runs as root there, and the files
+    # then go to the caller.
+    owner = f"{os.getuid()}:{os.getgid()}"
+    sh("docker", "run", "--rm", "--network", "none", "-v", f"{keys}:/k", "--entrypoint", "sh", SSHD_IMAGE, "-c",
+       'for k in agent host; do ssh-keygen -q -t ed25519 -N "" -C lab -f "/k/$k" || exit 1; done; chown "$0" /k/*',
+       owner)
     # The host server runs as the user of the runner and reads its key and
     # config only at mode 0600. The fake host runs as root.
     for f in os.listdir(keys):
@@ -98,6 +101,14 @@ def make_secrets(work):
             SSHD_IMAGE, "-l", "-E", "sha256", "-f", "/k/host.pub").split()[1]
     return {"MCP_KEY": secrets.token_hex(32), "SSH_MCP_TOKEN": secrets.token_hex(32),
             "GW_TOKEN": secrets.token_hex(32), "HOST_FP": fp, "keys": keys}
+
+
+def root_copy(work, src, dest):
+    """A copy of a plugin folder of the checkout, owned by root: the product
+    loads a plugin only from files of its own uid or of root, and the uid of
+    a CI runner is neither."""
+    sh("docker", "run", "--rm", "--network", "none", "-v", f"{src}:/src:ro", "-v", f"{work}:/w", PY_IMAGE,
+       "sh", "-c", f'cp -R /src "/w/{dest}" && chown -R 0:0 "/w/{dest}"')
 
 
 def render(work, s, product_change=None):
@@ -182,8 +193,8 @@ def start_agent(work, s):
         mounts += ["-v", f"{PLUGIN_DIR}:/lab/plugin:ro"]
     if OPENSHELL_DIR:
         mounts += ["-v", f"{OPENSHELL_DIR}:/lab/openshell:ro"]
-    if os.path.isdir(os.path.join(HERE, "broken")):
-        mounts += ["-v", f"{os.path.join(HERE, 'broken')}:/lab/broken:ro"]
+    if os.path.isdir(os.path.join(work, "broken")):
+        mounts += ["-v", f"{os.path.join(work, 'broken')}:/lab/broken:ro"]
     sh("docker", "run", "-d", "--name", name("agent"), "--network", NET, "--network-alias", "agent",
        "--read-only", "--tmpfs", "/tmp:uid=1000,gid=1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
        "-v", f"{vol}:/home/node/data", "-v", f"{work}/openclaw.json:/home/node/config/openclaw.json:ro", *mounts,
@@ -597,10 +608,14 @@ def rows_variants(work, s):
         c["plugins"]["load"]["paths"] = [p if p != PLUGIN_PATH else "/lab/broken" for p in c["plugins"]["load"]["paths"]]
 
     for label, change in (("off", disabled), ("not-allowed", not_allowed), ("absent", no_path), ("broken", broken)):
-        if label == "broken" and not os.path.isdir(os.path.join(HERE, "broken")):
+        if label == "broken" and not os.path.isdir(os.path.join(work, "broken")):
             record("plugin broken: no host tool", False, "no broken copy", untested=True)
             continue
         log, results, ran = rows_variant(work, s, label, change, False)
+        if "suspicious ownership" in log:
+            record(f"plugin {label}: no host call runs with no card", False,
+                   "the product blocked a plugin for its owner, not for the change")
+            continue
         loaded = "host-approval: loaded" in log
         write_ran = any(a.get("command") == f"touch /tmp/uc-{label}" for a in ran)
         if loaded:
@@ -776,6 +791,8 @@ def main():
     s = None
     try:
         s = make_secrets(work)
+        if os.path.isdir(os.path.join(HERE, "broken")):
+            root_copy(work, os.path.join(HERE, "broken"), "broken")
         render(work, s)
         up(work, s)
         version = sh("docker", "exec", name("agent"), "openclaw", "--version", check=False).strip()
