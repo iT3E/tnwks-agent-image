@@ -25,6 +25,7 @@ tnwks-ops builds the agent pod of each trust domain against this contract.
 | Archive directory | `/home/node/.openclaw-archives`: the same volume, `subPath: archives`. It is outside the state directory, so the sandbox plugin never copies it |
 | Port | 18789, on loopback. `/healthz` and `/readyz` answer on it |
 | Plugin paths | `/opt/openclaw/plugins/node_modules/@openclaw/openshell-sandbox` and `/opt/openclaw/plugins/node_modules/@openclaw/signal`. The config names them in `plugins.load.paths` |
+| Host approval plugin | `/opt/openclaw/local-plugins/host-approval`, owned by root and read only. The agent config in ops names it in `plugins.load.paths` and gives its config in `plugins.entries.host-approval`, whose `enabled` is the control of its load ("The host approval plugin") |
 | Official plugins | `brave` (the Brave provider of `web_search`). The official plugins step installs it in the state directory. The config enables it in `plugins.entries` and does not name a path for it ("The official plugins") |
 | Official plugins step | `install-official-plugins`, in an init container before doctor, with the env and the mounts of the gateway. It needs no secret and no network. It prints `official-plugins id=<id> version=<version> result=installed\|failed` for each plugin, or `official-plugins result=failed reason=<reason>`, and exits 1 on a failure. A failure stops the start of the pod |
 | OpenShell client certificate | `ca.crt`, `tls.crt` and `tls.key` in `/home/node/.config/openshell/gateways/<endpoint>/mtls/`. `<endpoint>` is the `gatewayEndpoint` of the plugin config with each `:` and `/` as `_`: for `https://openshell.<ns>.svc.cluster.local:8080` it is `https___openshell.<ns>.svc.cluster.local_8080` |
@@ -122,7 +123,54 @@ does this ([`tests/kind/manifests.py`](tests/kind/manifests.py)).
   and the official plugins step that installs them ("The official
   plugins"). The code of each one is in the state directory at run time,
   and each start of the pod replaces it with the code of the image.
+- **The host approval plugin:** our one own plugin, from
+  [`plugins/host-approval`](plugins/host-approval), in
+  `/opt/openclaw/local-plugins/host-approval`, read only ("The host approval
+  plugin").
 - **An empty archive directory** with mode 0700.
+
+## The host approval plugin
+
+The plugin asks the approver before each call of the host server that is
+not a listed read, and refuses each host call of anyone else (Design Doc of
+effort 0003 in tnwks-coe, section 4.2.6). The code and its unit tests are
+in [`plugins/host-approval`](plugins/host-approval). The `host-approval`
+stage of the Dockerfile runs the unit tests with the node of the product,
+so a red test stops the build, and copies the plugin without its tests into
+`/opt/openclaw/local-plugins/host-approval`.
+
+The agent config in ops loads it with two keys:
+
+- `plugins.load.paths` holds `/opt/openclaw/local-plugins/host-approval`.
+- `plugins.entries.host-approval` holds `enabled` and the config of the
+  plugin. The config schema is in
+  [`openclaw.plugin.json`](plugins/host-approval/openclaw.plugin.json). The
+  approver ID and the gateway key come from the env, never from a file of
+  this repository.
+
+At its load the plugin checks the product config. It refuses each tool
+call when an `mcp.servers` entry reaches the host route by any name,
+address or form of the path (an entry whose decoded first path segment is
+the host route, on any host and port; it resolves the host names where an
+address decides), or
+when a place of the config other than its own entry holds a form of its
+key. Until the check ends, and while a name does not resolve (DNS not ready
+at the start of the pod), it refuses each tool call; it tries again after
+2, 5, 10 and then each 30 seconds, and loads when the check passes.
+
+Its log lines name no channel, sender, chat ID or session key: `loaded,
+<n> read lines`, `refusing each tool call: <errors>`, and `refused <tool>
+(<reason>)`.
+
+The update check ([`tests/host-approval-check`](tests/host-approval-check))
+starts the image with fakes of the chat API, the model and an IRC server,
+the central MCP gateway, the host server and a fake Linux host, and runs
+the rows of the plugin on one internal network with no route out. The
+second channel is the IRC plugin of the product with the fake server.
+`bin/image-test` runs it in CI under the Build check. It is switched off
+(`host_approval_check=off`) until the host server has a release: to switch
+it on, add the `host-mcp` stage to `.github/test-cluster/Dockerfile` and
+set `host_approval_check=on`, in one pull request.
 
 ## The pins and their updates
 
@@ -135,6 +183,7 @@ repository.
 | OpenShell | `Dockerfile`, the `openshell-release` stage | Renovate, tag and digest. The CLI in the image, and the chart and images of the test cluster, follow it |
 | The images of the test cluster | [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. A change there makes no release |
 | kind, helm, kubectl | [`tests/kind/up.sh`](tests/kind/up.sh), a version and a sha256 each | By hand, from the checksum file of each release. Renovate does not read files under `tests/` |
+| The images of the update check of the host approval plugin | The `mcp-gateway`, `sshd-base` and `host-mcp` stages of [`.github/test-cluster/Dockerfile`](.github/test-cluster/Dockerfile) | Renovate, tag and digest. The `host-mcp` stage is not there yet ("The host approval plugin") |
 
 ## The image age check
 

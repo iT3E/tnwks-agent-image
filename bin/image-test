@@ -20,6 +20,20 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "== the image: $image"
 (cd "$repo/tests" && python3 -m unittest -v test_image)
 
+# The update check of the host approval plugin (tests/host-approval-check),
+# in CI, or on a workstation with IMAGE_TEST_HOST_APPROVAL=1. It needs the
+# released host server image, a `host-mcp` stage of
+# .github/test-cluster/Dockerfile. SWITCHED OFF until that release exists:
+# to switch it on, add that stage and set host_approval_check=on here, in
+# one pull request. When it is on, a missing pin fails the test.
+host_approval_check=off
+if [[ "$host_approval_check" == "on" && ( "${CI:-}" == "true" || "${IMAGE_TEST_HOST_APPROVAL:-}" == "1" ) ]]; then
+  echo "== the update check of the host approval plugin"
+  "$repo/tests/host-approval-check/run.sh" "$image"
+else
+  echo "== the update check of the host approval plugin: skipped (host_approval_check=$host_approval_check; it runs in CI, or with IMAGE_TEST_HOST_APPROVAL=1)"
+fi
+
 if [[ "${CI:-}" != "true" && "${IMAGE_TEST_KIND:-}" != "1" ]]; then
   echo "== the tool test and the trace test run in CI only, on a kind cluster: skipped"
   exit 0

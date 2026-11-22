@@ -86,6 +86,32 @@ RUN set -eu; \
       /opt/openclaw/npm-cache/_update-notifier-last-checked; \
     chmod -R a+rX,go-w /opt/openclaw/npm-cache
 
+# ---- the host approval plugin ----
+# Our one own plugin (plugins/host-approval; Design Doc of effort 0003,
+# section 4.2.6, "The prompt, our one own part"). Its unit tests run here
+# with the node of the product. A red test, no test file, or no passed test
+# stops the build. The image
+# gets the plugin without its tests, owned by root and read only. The agent
+# config in ops names it: plugins.load.paths holds
+# /opt/openclaw/local-plugins/host-approval, and plugins.entries.host-approval
+# (with enabled and its config) is the control of its load.
+FROM product AS host-approval
+USER root
+COPY plugins/host-approval /tmp/host-approval
+RUN set -eu; \
+    cd /tmp/host-approval; \
+    ls test/*.test.js >/dev/null; \
+    node --test --test-reporter=tap test/*.test.js > /tmp/unit-tests.tap 2>&1 \
+      || { cat /tmp/unit-tests.tap; exit 1; }; \
+    cat /tmp/unit-tests.tap; \
+    grep -Eq '^# pass [1-9]' /tmp/unit-tests.tap; \
+    grep -Eq '^# fail 0$' /tmp/unit-tests.tap; \
+    rm /tmp/unit-tests.tap; \
+    mkdir -p /opt/openclaw/local-plugins/host-approval; \
+    cp index.js lib.js openclaw.plugin.json package.json /opt/openclaw/local-plugins/host-approval/; \
+    chown -R root:root /opt/openclaw/local-plugins; \
+    chmod -R a+rX,go-w /opt/openclaw/local-plugins
+
 # ---- the image ----
 FROM product
 USER root
@@ -93,6 +119,7 @@ USER root
 COPY --from=openshell-cli /out/openshell /usr/local/bin/openshell
 COPY --from=openshell-cli /out/openshell.release /opt/openclaw/openshell.release
 COPY --from=plugins /opt/openclaw/plugins /opt/openclaw/plugins
+COPY --from=host-approval /opt/openclaw/local-plugins /opt/openclaw/local-plugins
 COPY --from=official-plugins /opt/openclaw/npm-cache /opt/openclaw/npm-cache
 COPY official-plugins.txt /opt/openclaw/official-plugins.txt
 COPY image/install-official-plugins /usr/local/bin/install-official-plugins

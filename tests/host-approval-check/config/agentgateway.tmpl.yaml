@@ -1,0 +1,61 @@
+# The central gateway of the lab, in the form of the ops config: one route
+# for the host server of the main agent, with the key of the main agent and
+# a second metadata field that names the route. Until the R3 yes the tool
+# rule names the six read tools only (Design Doc, section 4.2.6).
+config:
+  adminAddr: localhost:15000
+  statsAddr: 0.0.0.0:15020
+  readinessAddr: 0.0.0.0:15021
+  session:
+    key: disabled
+  logging:
+    format: json
+
+frontendPolicies:
+  accessLog:
+    add:
+      client: apiKey.client
+
+gateways:
+  mcp:
+    port: 3000
+
+routes:
+  - name: main-host
+    gateways: mcp
+    matches:
+      - path:
+          pathPrefix: /main-host/
+    policies:
+      apiKey:
+        mode: strict
+        location:
+          header:
+            name: Authorization
+            prefix: "Bearer "
+        keys:
+          - keyHash: "sha256:@MCP_KEY_HASH@"
+            metadata: {client: main, route: main-host}
+      timeout:
+        requestTimeout: 120s
+      transformations:
+        request:
+          replace: 'request.headers.filterKeys(k, k in ["accept", "content-type", "mcp-protocol-version", "mcp-session-id", "last-event-id"])'
+      mcpAuthorization:
+        rules:
+          - allow: |
+              mcp.tool.name in [@TOOLS@] && apiKey.client == "main"
+    backends:
+      - mcp:
+          statefulMode: stateless
+          prefixMode: conditional
+          failureMode: failClosed
+          targets:
+            - name: host
+              mcp:
+                host: http://sshmcp:3000/
+              policies:
+                backendAuth:
+                  key: "@SSH_MCP_TOKEN@"
+                http:
+                  requestTimeout: 120s

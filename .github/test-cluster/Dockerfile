@@ -21,3 +21,16 @@ FROM otel/opentelemetry-collector:0.139.0@sha256:8ac5df2a931e9264667b236d65bf759
 
 # The image of each sandbox of the test, and of the mock model server.
 FROM docker.io/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS python
+
+# The update check of the host approval plugin (tests/host-approval-check).
+# The central MCP gateway, at the pin of the ops repository.
+FROM cr.agentgateway.dev/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b AS mcp-gateway
+
+# The base of the fake Linux host of the check (tests/host-approval-check/sshd).
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS sshd-base
+
+# The host server: the released image of tnwks-host-mcp, at its tag and
+# digest. NOT SET YET: the first release of that repository does not exist.
+# The pull request that switches the check on (host_approval_check=on in
+# bin/image-test) adds the stage here:
+#   FROM ghcr.io/it3e/tnwks-host-mcp:<version>@sha256:<digest> AS host-mcp

@@ -1,0 +1,75 @@
+{
+  "id": "host-approval",
+  "name": "Host approval",
+  "description": "Asks the approver before each host server call that is not a listed read.",
+  "categories": [
+    "other"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "serverPrefixes",
+      "readProfile",
+      "approverId",
+      "approvalChannel",
+      "mcpUrl",
+      "mcpKeyEnv"
+    ],
+    "properties": {
+      "serverPrefixes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "knownTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "readProfile": {
+        "type": "string"
+      },
+      "readList": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "promptTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "approverId": {
+        "type": "string"
+      },
+      "approvalChannel": {
+        "type": "string"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      },
+      "mcpUrl": {
+        "type": "string"
+      },
+      "mcpKeyEnv": {
+        "type": "string"
+      }
+    }
+  },
+  "mcpServers": {
+    "host": {
+      "transport": "streamable-http",
+      "url": "http://host-approval-plugin-not-loaded.invalid/"
+    }
+  }
+}
