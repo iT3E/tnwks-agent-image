@@ -30,7 +30,5 @@ FROM cr.agentgateway.dev/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS sshd-base
 
 # The host server: the released image of tnwks-host-mcp, at its tag and
-# digest. NOT SET YET: the first release of that repository does not exist.
-# The pull request that switches the check on (host_approval_check=on in
-# bin/image-test) adds the stage here:
-#   FROM ghcr.io/it3e/tnwks-host-mcp:<version>@sha256:<digest> AS host-mcp
+# digest (ssh-mcp v2.26.0, the pin of the ops repository).
+FROM ghcr.io/it3e/tnwks-host-mcp:0.1.0@sha256:8c17e38459ed4c7bc11f967c40e73a7994a5f2bc5cac7c451a4a3f327d8909d6 AS host-mcp
