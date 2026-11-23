@@ -27,7 +27,7 @@ FROM docker.io/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d4
 FROM cr.agentgateway.dev/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b AS mcp-gateway
 
 # The base of the fake Linux host of the check (tests/host-approval-check/sshd).
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS sshd-base
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS sshd-base
 
 # The host server: the released image of tnwks-host-mcp, at its tag and
 # digest (ssh-mcp v2.26.0, the pin of the ops repository).
