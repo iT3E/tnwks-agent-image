@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.5.1 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: fix(container): update image ghcr.io/nvidia/openshell/sandbox to v0.1.9 (#26)
+
 ## v0.5.0 - 2026-11-22
 
 ### Added
