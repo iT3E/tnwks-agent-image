@@ -171,8 +171,16 @@ starts the image with fakes of the chat API, the model and an IRC server,
 the central MCP gateway, the host server and a fake Linux host, and runs
 the rows of the plugin on one internal network with no route out. The
 second channel is the IRC plugin of the product with the fake server.
+The rows of the Control UI path start the gateway in the trusted proxy
+form of the main agent in ops, behind a fake ingress that sets the one
+signed-in user, with a browser device of the Control UI (the gateway
+client of the product, with the scopes and capabilities that the UI asks
+for). They check that the device gets the four default scopes and no admin
+scope, that a web turn finds and calls no host tool, and that a card in the
+direct chat of the approver is not on the device, before and after his no
+there. No host write runs.
 `bin/image-test` runs it in CI under the Build check, and on a workstation
-with `IMAGE_TEST_HOST_APPROVAL=1`. It takes about 5 minutes.
+with `IMAGE_TEST_HOST_APPROVAL=1`. It takes about 10 minutes.
 
 ## The pins and their updates
 

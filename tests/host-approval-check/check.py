@@ -6,7 +6,9 @@ read only, the four tools of A1 denied), next to a fake chat API, a second
 chat channel (IRC, the case of a cutover), a fake model with scripted tool
 calls, the gateway, the host server image and a fake host. Then it runs
 each row as an assertion and prints a table. Exit code 0 only if each row
-passes.
+passes. The last rows run the gateway in the trusted proxy form of the
+Control UI path, behind a fake ingress (fakes/fake_ingress.py), with a
+browser device of the Control UI (fakes/ui_client.mjs).
 
 Each part runs in a container on one internal Docker network: no route out,
 no secret (each key and token is made new for the run and removed after),
@@ -179,7 +181,10 @@ def up(work, s):
     start_agent(work, s)
 
 
-def start_agent(work, s):
+def start_agent(work, s, ui=False):
+    """Start the product. With ui, in the trusted proxy form of the Control
+    UI path: that auth mode refuses a gateway token, so the CLI in the
+    container gets the same value as the gateway password, as in ops."""
     sh("docker", "rm", "-f", name("agent"), check=False)
     for old_vol in VOLS:
         sh("docker", "volume", "rm", old_vol, check=False)
@@ -201,7 +206,9 @@ def start_agent(work, s):
        "-e", "OPENCLAW_STATE_DIR=/home/node/data/state", "-e", "OPENCLAW_CONFIG_PATH=/home/node/config/openclaw.json",
        "-e", "OPENCLAW_CONFIG_READONLY=1", "-e", "OPENCLAW_NO_AUTO_UPDATE=1", "-e", "DO_NOT_TRACK=1",
        "-e", "OPENCLAW_OFFLINE=1", "-e", "XDG_CACHE_HOME=/home/node/data/state/.cache",
-       "-e", f"OPENCLAW_GATEWAY_TOKEN={s['GW_TOKEN']}", "-e", "LITELLM_API_KEY=lab-not-a-key",
+       *(["-e", "OPENCLAW_GATEWAY_TOKEN=", "-e", f"OPENCLAW_GATEWAY_PASSWORD={s['GW_TOKEN']}"] if ui else
+         ["-e", f"OPENCLAW_GATEWAY_TOKEN={s['GW_TOKEN']}"]),
+       "-e", "LITELLM_API_KEY=lab-not-a-key",
        "-e", "TELEGRAM_BOT_TOKEN=1000000:lab-not-a-real-token", "-e", f"MCP_KEY={s['MCP_KEY']}",
        AGENT_IMAGE)
     since = time.time()
@@ -217,7 +224,7 @@ def start_agent(work, s):
 
 
 def down(work):
-    parts = ["agent", "agw", "sshmcp", "sshd", "fakechat", "fakemodel", "fakeirc"]
+    parts = ["agent", "agw", "sshmcp", "sshd", "fakechat", "fakemodel", "fakeirc", "uiclient", "uiingress"]
     sh("docker", "rm", "-f", *[name(p) for p in parts], check=False)
     for vol in VOLS:
         sh("docker", "volume", "rm", vol, check=False)
@@ -768,11 +775,153 @@ def rows_card_while_others_write(work, s):
     record(row, not before and (ran or failed_closed), f"ran before the yes {before}; {outcome}")
 
 
+# The Control UI path of the main agent (task 6.52): the gateway in the
+# trusted proxy form of ops, behind a fake ingress that sets the one
+# signed-in user, and a browser device of the Control UI.
+LAB_USER = "operator@lab.invalid"  # a lab user, not a real one
+UI_ORIGIN = "https://ui.lab.invalid"
+UI_SCOPES = ["operator.read", "operator.write", "operator.approvals", "operator.questions"]
+
+
+def control_ui(ingress_ip):
+    """The gateway block of the main agent in ops, with the lab values: the
+    fake ingress is the one trusted proxy, and the lab user the one user."""
+    def change(c):
+        c["gateway"] = {
+            "mode": "local", "bind": "lan", "port": 18789, "trustedProxies": [f"{ingress_ip}/32"],
+            "auth": {"mode": "trusted-proxy", "trustedProxy": {
+                "userHeader": "x-auth-request-email", "requiredHeaders": ["x-forwarded-proto", "x-forwarded-host"],
+                "allowUsers": [LAB_USER], "deviceAutoApprove": {"enabled": True, "scopes": UI_SCOPES}}},
+            "controlUi": {"enabled": True, "allowedOrigins": [UI_ORIGIN]},
+        }
+    return change
+
+
+def ui_lines():
+    """The JSON lines of the browser device so far."""
+    p = subprocess.run(["docker", "logs", name("uiclient")], capture_output=True, text=True)
+    out = []
+    for line in (p.stdout + p.stderr).splitlines():
+        try:
+            v = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            out.append(v)
+    return out
+
+
+def start_ui_client(messages=()):
+    sh("docker", "rm", "-f", name("uiclient"), check=False)
+    script = os.path.join(HERE, "fakes", "ui_client.mjs")
+    sh("docker", "run", "-d", "--name", name("uiclient"), "--network", NET, "--read-only",
+       "--tmpfs", "/tmp:uid=1000,gid=1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+       # The browser reaches the real ingress over TLS. The lab network is
+       # internal, so the client takes plain ws with the flag of the product.
+       "-e", "OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1",
+       "-e", "HOME=/tmp", "-e", "OPENCLAW_STATE_DIR=/tmp/state", "-e", "URL=ws://uiingress:8080",
+       "-e", f"ORIGIN={UI_ORIGIN}", "-e", "SESSION=main", "-e", f"MESSAGES={json.dumps(list(messages))}", "-e", "POLL_MS=2000",
+       "-v", f"{script}:/opt/openclaw/plugins/lab-ui-client.mjs:ro", "--entrypoint", "node", AGENT_IMAGE,
+       "/opt/openclaw/plugins/lab-ui-client.mjs")
+    return wait(lambda: next((x for x in ui_lines() if "hello" in x or "connect_error" in x or "close" in x), None), 60)
+
+
+def pending_as_admin():
+    """The ids of the pending plugin approvals, as the CLI in the container
+    sees them with the gateway password and the admin scope."""
+    out = sh("docker", "exec", name("agent"), "openclaw", "approvals", "pending", "--json", check=False)
+    try:
+        return [a.get("id") for a in json.loads(out[out.index("{"):]).get("approvals", []) if a.get("kind") == "plugin"]
+    except (ValueError, AttributeError):
+        return None
+
+
+def rows_control_ui(work, s):
+    """Task 6.52: the host gate on the path of the Control UI. A web turn has
+    no host tool, and a browser device sees no card of the direct chat of
+    the approver, before and after his no there. No host write runs."""
+    sh("docker", "rm", "-f", name("uiingress"), check=False)
+    fakes = os.path.join(HERE, "fakes")
+    sh("docker", "run", "-d", "--name", name("uiingress"), "--network", NET, "--network-alias", "uiingress",
+       "-e", f"LAB_USER={LAB_USER}", "-e", "UPSTREAM=agent:18789", "-v", f"{fakes}:/f:ro", PY_IMAGE,
+       "python", "-I", "/f/fake_ingress.py")
+    ip = sh("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            name("uiingress")).strip()
+    render(work, s, control_ui(ip))
+    log = start_agent(work, s, ui=True)
+    loaded = "host-approval: loaded" in log and "refusing each tool call" not in log
+    # The tool search of a turn lists each tool the turn can call; the
+    # host read tool comes first for its exact name in the approver's
+    # direct chat (the control), and must not come in a web turn.
+    search = {"query": "host__read-command"}
+    n_dm = nonce()
+    chat_msg(APPROVER, f"CALL {n_dm} tool_search " + json.dumps(search, separators=(",", ":")))
+    dm = wait(lambda: result_of(work, n_dm), 60)
+    a0 = len(audit())
+    n_search = nonce()
+    n = nonce()
+    hello = start_ui_client([f"CALL {n_search} tool_search " + json.dumps(search, separators=(",", ":")),
+                             call_text(n, "host__read-command", {"profile": "agent", "command": "uptime"})])
+    scopes = sorted((hello or {}).get("hello", {}).get("scopes") or [])
+    record("the Control UI path: a browser device signs in through the proxy with the four default scopes",
+           loaded and scopes == sorted(UI_SCOPES) and "operator.admin" not in scopes,
+           f"plugin loaded {loaded}, device {hello}")
+    if "hello" not in (hello or {}):
+        for row in ("the Control UI path: the effective tools of a web turn list no host tool",
+                    "the Control UI path: a web turn gets no host call",
+                    "the Control UI path: a card in the direct chat is not on the browser device",
+                    "the Control UI path: after a no in the direct chat, no card is on the device and nothing ran"):
+            record(row, False, "the browser device did not connect", untested=True)
+        return
+    web = wait(lambda: result_of(work, n_search), 90)
+    record("the Control UI path: the effective tools of a web turn list no host tool",
+           bool(dm) and "host__read-command" in dm and bool(web) and "host__" not in web,
+           f"tool search in the direct chat lists it {'host__read-command' in str(dm)}, "
+           f"in the web turn {None if web is None else 'host__' in web}")
+    res = wait(lambda: result_of(work, n), 90)
+    record("the Control UI path: a web turn gets no host call",
+           bool(res) and "Unknown tool id: host__" in res and not audit_has("uptime", a0),
+           f"result {str(res)[:90]!r}")
+
+    # A card waits in the direct chat of the approver; the device polls its
+    # list each 2 s and logs each approval event it gets.
+    a0 = len(audit())
+    seen = len(ui_lines())
+    n, card = owner_card(work, "touch /tmp/uc-control-ui", "control-ui")
+    if not card:
+        record("the Control UI path: a card in the direct chat is not on the browser device", False, "no card")
+        return
+    time.sleep(8)
+    admin = pending_as_admin()
+    during = ui_lines()[seen:]
+    lists = [x["list"] for x in during if "list" in x]
+    events = [x for x in during if "event" in x]
+    errors = [x for x in during if "list_error" in x]
+    record("the Control UI path: a card in the direct chat is not on the browser device",
+           bool(lists) and all(not x for x in lists) and not events and not errors and bool(admin),
+           f"lists {len(lists)}, ids on the device {sorted({i for x in lists for i in x})}, events {events}, "
+           f"errors {errors[:1]}, pending for the admin {len(admin or [])}")
+    seen = len(ui_lines())
+    decide_card(card, APPROVER, "deny")
+    res = wait(lambda: result_of(work, n), 60)
+    time.sleep(6)
+    after = ui_lines()[seen:]
+    lists = [x["list"] for x in after if "list" in x]
+    events = [x for x in after if "event" in x]
+    record("the Control UI path: after a no in the direct chat, no card is on the device and nothing ran",
+           res is not None and bool(lists) and all(not x for x in lists) and not events and
+           not audit_has("touch /tmp/uc-control-ui", a0) and not pending_as_admin(),
+           f"lists {len(lists)}, events {events}, result {str(res)[:80]!r}")
+    sh("docker", "rm", "-f", name("uiclient"), name("uiingress"), check=False)
+
+
 # The rows of a full run. In CI each must run: a skip flag, fewer rows, or
 # a row that could not be tested (but the heartbeat row, which a release
-# with no heartbeat can not test) fails the check.
-EXPECTED_ROWS = 32
-SKIP_FLAGS = ("UC_ONLY_VARIANTS", "UC_SKIP_VARIANTS", "UC_SKIP_GROUP_COMMANDS", "UC_SKIP_OTHERS_WRITE")
+# with no heartbeat can not test) fails the check. The count is of the rows
+# before the row of check_complete, so a full run prints one more row.
+EXPECTED_ROWS = 37
+SKIP_FLAGS = ("UC_ONLY_VARIANTS", "UC_SKIP_VARIANTS", "UC_SKIP_GROUP_COMMANDS", "UC_SKIP_OTHERS_WRITE",
+              "UC_SKIP_CONTROL_UI")
 
 
 def check_complete():
@@ -805,6 +954,8 @@ def main():
             rows_group_commands(work, s)
         if ENV.get("UC_SKIP_OTHERS_WRITE") != "1":
             rows_card_while_others_write(work, s)
+        if ENV.get("UC_SKIP_CONTROL_UI") != "1":
+            rows_control_ui(work, s)
     except Exception as err:  # a fault of the check itself is a failure
         record("the check ran to the end", False, repr(err)[:400])
     finally:
