@@ -7,7 +7,10 @@
 // asks the approver (allow once or deny, 10 minutes at most). A tool of the
 // host server that the config does not know is refused with no prompt. A
 // tool that the config names in `promptTools` (a browser tool that can send
-// a form) also asks. Any fault of config or of the hook refuses the call.
+// a form) also asks, with the same requester check as the host tools, so it
+// runs only in a turn of the approver on his channel: a turn of the web UI,
+// of a group or of a job is refused before a card. Any fault of config or
+// of the hook refuses the call.
 
 export const PLUGIN_ID = "host-approval";
 export const MAX_TIMEOUT_MS = 600_000;
@@ -453,6 +456,11 @@ export function decide(state, event, ctx) {
   }
   const config = state.config;
   if (config.promptTools.has(toolName)) {
+    // The requester check comes first: a card of a turn that is not the
+    // approver's could be answered on the device of that turn.
+    if (!requesterIsApprover(config, ctx)) {
+      return block("a browser form call is for the approver on his channel only");
+    }
     return approval(config, "Browser action", toolName, params);
   }
   const host = hostToolOf(toolName, config);

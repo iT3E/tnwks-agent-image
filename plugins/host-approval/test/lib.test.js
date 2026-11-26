@@ -143,7 +143,7 @@ test("a host server tool under another server name is refused", () => {
   }
 });
 
-test("a browser tool named in promptTools prompts (D133)", () => {
+test("a browser tool named in promptTools prompts in a turn of the approver (D133)", () => {
   const r = decideOwner(state(), { toolName: "browser__browser_click", params: { ref: "e1" } });
   assert.ok(r?.requireApproval);
   assert.equal(decideOwner(state(), { toolName: "browser__browser_snapshot", params: {} }), undefined);
@@ -383,11 +383,64 @@ test("the hook refuses each host server call that is not of the approver on his 
   assert.ok(decide(st, write, { requester: { channel: "telegram", senderId: `telegram:${APPROVER}` } })?.requireApproval);
 });
 
-test("the sender rule does not touch tools of other servers or the browser prompt", () => {
+test("the sender rule does not touch tools of other servers", () => {
   const st = state();
   assert.equal(decide(st, { toolName: "web_fetch", params: {} }, undefined), undefined);
   assert.equal(decide(st, { toolName: "vault__read_text_file", params: {} }, { requester: { channel: "irc", senderId: "x" } }), undefined);
-  assert.ok(decide(st, { toolName: "browser__browser_click", params: { ref: "e1" } }, undefined)?.requireApproval);
+  assert.equal(decide(st, { toolName: "browser__browser_snapshot", params: {} }, undefined), undefined);
+});
+
+// The turns of 2026.11.3 as the hook sees them: no requester, the
+// conversation as channelId (none for a turn of the web UI).
+const WEB_TURNS = [
+  undefined,
+  {},
+  { sessionKey: "agent:main:main" },
+  { channelId: "webchat", sessionKey: "agent:main:main" },
+  { channelId: `webchat:${APPROVER}`, sessionKey: "agent:main:main" },
+];
+const GROUP_TURN = { channelId: "telegram:-1000000000001", sessionKey: "agent:main:telegram:group:-1000000000001" };
+const DIRECT_TURN = { channelId: `telegram:${APPROVER}`, sessionKey: `agent:main:telegram:direct:${APPROVER}` };
+
+test("a browser form call runs only in the direct chat of the approver (D188)", () => {
+  const st = state();
+  for (const toolName of RAW.promptTools) {
+    const form = { toolName, params: { ref: "e1" } };
+    assert.ok(decide(st, form, DIRECT_TURN)?.requireApproval, toolName);
+    assert.ok(decide(st, form, OWNER)?.requireApproval, toolName);
+    for (const ctx of WEB_TURNS) {
+      const r = decide(st, form, ctx);
+      assert.equal(r?.block, true, `${toolName} ${JSON.stringify(ctx)}`);
+      assert.equal(r.requireApproval, undefined);
+      assert.match(r.blockReason, /browser form call is for the approver/);
+    }
+    assert.equal(decide(st, form, GROUP_TURN)?.block, true, toolName);
+    for (const requester of [{ channel: "irc", senderId: APPROVER }, { channel: "telegram", senderId: "1000002" },
+                             { channel: "webchat", senderId: APPROVER }]) {
+      assert.equal(decide(st, form, { ...DIRECT_TURN, requester })?.block, true, JSON.stringify(requester));
+    }
+  }
+});
+
+test("the host tools and the browser form tools take the same requester check", () => {
+  const st = state();
+  const write = call("run-command", { command: "id", profile: "agent" });
+  const form = { toolName: "browser__browser_fill_form", params: { fields: [] } };
+  for (const ctx of [...WEB_TURNS, GROUP_TURN, DIRECT_TURN, OWNER, { requester: { channel: "irc", senderId: APPROVER } },
+                     { channelId: `irc:${APPROVER}` }, { channelId: `telegram:${APPROVER}:x` }]) {
+    assert.equal(Boolean(decide(st, write, ctx)?.block), Boolean(decide(st, form, ctx)?.block), JSON.stringify(ctx));
+  }
+});
+
+test("the register step refuses a browser form call of a web turn and a group turn", async () => {
+  const hooks = [];
+  plugin.register({ pluginConfig: RAW, config: PRODUCT, logger: {}, on: (n, h) => hooks.push(h),
+    registerMcpServerConnectionResolver: () => {} });
+  await plugin.ready;
+  const form = { toolName: "browser__browser_click", params: { ref: "e1" } };
+  assert.ok(hooks[0](form, DIRECT_TURN)?.requireApproval);
+  assert.equal(hooks[0](form, { sessionKey: "agent:main:main" })?.block, true);
+  assert.equal(hooks[0](form, GROUP_TURN)?.block, true);
 });
 
 test("the register step passes the context of the hook", async () => {

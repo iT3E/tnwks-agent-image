@@ -133,7 +133,11 @@ does this ([`tests/kind/manifests.py`](tests/kind/manifests.py)).
 
 The plugin asks the approver before each call of the host server that is
 not a listed read, and refuses each host call of anyone else (Design Doc of
-effort 0003 in tnwks-coe, section 4.2.6). The code and its unit tests are
+effort 0003 in tnwks-coe, section 4.2.6). A tool of `promptTools` (a
+browser tool that can send a form) asks too, with the same requester check
+as the host calls: it runs only in a turn of the approver on his channel,
+and a turn of the web UI, of a group or of a job is refused before a card.
+The code and its unit tests are
 in [`plugins/host-approval`](plugins/host-approval). The `host-approval`
 stage of the Dockerfile runs the unit tests with the node of the product,
 so a red test stops the build, and copies the plugin without its tests into
