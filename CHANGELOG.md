@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.5.4 - 2026-11-27
+
+### Fixed
+
+* Dependency updates: fix(container): update image ghcr.io/openclaw/openclaw to v2026.11.10 (#27)
+
 ## v0.5.3 - 2026-11-27
 
 ### Fixed
