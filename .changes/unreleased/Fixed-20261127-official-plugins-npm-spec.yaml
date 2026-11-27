@@ -1,3 +1,0 @@
-kind: Fixed
-body: 'The official plugins install from the npm registry with an "npm:" spec, in the build and in the official plugins step of the pod: from OpenClaw 2026.11.10 the installer takes a bare package name from ClawHub and refuses --pin for it'
-time: 2026-11-27T12:00:00.000000000Z

@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.5.3 - 2026-11-27
+
+### Fixed
+
+* The official plugins install from the npm registry with an "npm:" spec, in the build and in the official plugins step of the pod: from OpenClaw 2026.11.10 the installer takes a bare package name from ClawHub and refuses --pin for it
+
 ## v0.5.2 - 2026-11-26
 
 ### Fixed
