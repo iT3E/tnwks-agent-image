@@ -10,7 +10,7 @@
 # The product, at one release and its digest. Renovate moves the tag and the
 # digest together. A patch release merges when CI is green; a new monthly line
 # waits for the owner.
-FROM ghcr.io/openclaw/openclaw:2026.11.3@sha256:e73f689d663567f0fe3c5a85c54beb3e102dc21f0814bf375e9039ee2d2df51b AS product
+FROM ghcr.io/openclaw/openclaw:2026.11.10@sha256:230afbdd8344310cac1e2d8e5dfad67315e82f3757692014310e77653639acb0 AS product
 
 # The sandbox layer, at one OpenShell release and its digest. This image is
 # the trusted runtime of a sandbox, and its binary reports the release. The
