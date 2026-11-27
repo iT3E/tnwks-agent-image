@@ -103,8 +103,10 @@ state() {
 
 sed -e 's/#.*//' "$list" | while read -r id package; do
   [ -n "$id" ] || continue
-  # --force replaces the record of an earlier install.
-  if ! node /app/openclaw.mjs plugins install "$package@$version" --pin --no-enable --force; then
+  # --force replaces the record of an earlier install. "npm:" names the
+  # npm registry (the cache): from 2026.11.10 the product takes a bare
+  # package name from ClawHub.
+  if ! node /app/openclaw.mjs plugins install "npm:$package@$version" --pin --no-enable --force; then
     echo "official-plugins id=$id version=$version result=failed"
     exit 1
   fi
