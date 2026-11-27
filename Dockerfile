@@ -68,6 +68,8 @@ RUN set -eu; \
 # product, with no network (image/install-official-plugins): that install
 # makes each one a verified official install. This stage runs the same
 # installer, with the network, so that the cache holds each request it makes.
+# "npm:" names the npm registry: the product takes a bare package name from
+# ClawHub.
 FROM product AS official-plugins
 USER root
 COPY official-plugins.txt /opt/openclaw/official-plugins.txt
@@ -80,7 +82,7 @@ RUN set -eu; \
       [ -n "${id}" ] || continue; \
       OPENCLAW_STATE_DIR=/tmp/seed OPENCLAW_CONFIG_PATH=/tmp/seed/openclaw.json \
       NPM_CONFIG_USERCONFIG=/tmp/npmrc OPENCLAW_NO_AUTO_UPDATE=1 DO_NOT_TRACK=1 \
-        node /app/openclaw.mjs plugins install "${package}@${version}" --pin --no-enable; \
+        node /app/openclaw.mjs plugins install "npm:${package}@${version}" --pin --no-enable; \
     done; \
     rm -rf /tmp/seed /tmp/npmrc /opt/openclaw/npm-cache/_logs \
       /opt/openclaw/npm-cache/_update-notifier-last-checked; \
