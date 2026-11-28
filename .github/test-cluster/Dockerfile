@@ -20,7 +20,7 @@ FROM registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.12@sha256:b0ee9
 FROM otel/opentelemetry-collector:0.139.0@sha256:8ac5df2a931e9264667b236d65bf7591fa4ba633a7a634e6caa2f0a4fc549c07 AS collector
 
 # The image of each sandbox of the test, and of the mock model server.
-FROM docker.io/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS python
+FROM docker.io/library/python:3.15-slim@sha256:08a4c22c92b79ec821a7ad49768480039ee5b7accac3955228e75366e30abc8e AS python
 
 # The update check of the host approval plugin (tests/host-approval-check).
 # The central MCP gateway, at the pin of the ops repository.
